@@ -48,6 +48,30 @@ QUERIES = [
     "hackathon 报名 截止日期",
 ]
 
+# 标题/摘要必须命中这些关键词之一才保留（过滤无关结果）
+RELEVANT_KEYWORDS = [
+    "黑客松",
+    "黑客马拉松",
+    "hackathon",
+    "Hackathon",
+    "编程马拉松",
+    "创新马拉松",
+    "编程大赛",
+]
+
+# 明确排除的无关来源/内容特征
+EXCLUDE_TITLE_HINTS = [
+    "ecoflow",
+    "登录",
+    "log in",
+    "sign in",
+    "đà nẵng",
+    "bản đồ",
+    "danh sách",
+    "phường",
+    "quận",
+]
+
 
 # ---------------------------------------------------------------------------
 # 数据结构
@@ -233,6 +257,17 @@ def search_all() -> list[Event]:
     return results
 
 
+def is_relevant(ev: Event) -> bool:
+    """关键词过滤：标题或摘要必须包含黑客松相关词，并排除明显无关内容。"""
+    text = (ev.title or "") + " " + (ev.snippet or "")
+    lower = text.lower()
+    if not any(k.lower() in lower for k in RELEVANT_KEYWORDS):
+        return False
+    if any(h in (ev.title or "").lower() for h in EXCLUDE_TITLE_HINTS):
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Notion
 # ---------------------------------------------------------------------------
@@ -366,6 +401,7 @@ def main() -> int:
     print(f"[info] 日期: {date_str}，开始搜索…")
 
     events = search_all()
+    events = [ev for ev in events if is_relevant(ev)]
     # 简单去重 + 排序（有发布日期/截止日期的靠前）
     unique: list[Event] = []
     seen: set[str] = set()
