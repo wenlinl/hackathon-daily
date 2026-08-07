@@ -31,7 +31,6 @@ NOTION_VERSION = "2022-06-28"
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
 DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（真实 ID，2026-08-08 确认）
-DB_TASKS_ID = "9a81ee99925544208ceb65bdf99a8703"          # "我的任务" 数据库（需用户分享给 integration）
 
 HEADERS = {
     "User-Agent": (
@@ -296,24 +295,6 @@ def write_events_to_2026(date_str: str, events: list[Event]) -> None:
             print(f"[warn] 写入 2026 失败 {ev.title}: {exc}", file=sys.stderr)
 
 
-def write_tasks(date_str: str, events: list[Event]) -> None:
-    """把待办事项写入 我的任务 数据库。"""
-    if not events:
-        print("[info] 没有待跟进事项，跳过任务写入")
-        return
-    title_prop = find_title_property(DB_TASKS_ID)
-    print(f"[info] 我的任务 数据库标题属性: {title_prop}")
-    todo = f"跟进黑客松活动（{date_str}）：{'、'.join(e.title[:30] for e in events[:5])}"
-    properties = {
-        title_prop: {"title": [{"type": "text", "text": {"content": todo}}]},
-    }
-    try:
-        notion_create_page({"type": "database_id", "database_id": DB_TASKS_ID}, properties)
-        print(f"[ok] 我的任务 已写入: {todo}")
-    except RuntimeError as exc:
-        print(f"[warn] 写入 我的任务 失败: {exc}", file=sys.stderr)
-
-
 def validate_config() -> None:
     if not NOTION_TOKEN:
         print("[error] 缺少环境变量 NOTION_TOKEN", file=sys.stderr)
@@ -350,7 +331,7 @@ def check_notion() -> int:
         return 1
     print("[ok] Daily Record 可访问")
 
-    for label, db_id in (("2026 数据库", DB_2026_ID), ("我的任务", DB_TASKS_ID)):
+    for label, db_id in (("2026 数据库", DB_2026_ID),):
         try:
             schema = notion_database_schema(db_id)
             props = {name: prop.get("type") for name, prop in schema.get("properties", {}).items()}
@@ -410,7 +391,6 @@ def main() -> int:
 
     write_daily_summary(date_str, unique[:30])
     write_events_to_2026(date_str, unique[:30])
-    write_tasks(date_str, unique[:30])
     print("[done] 全部完成")
     return 0
 
