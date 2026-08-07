@@ -15,6 +15,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone, timedelta
 from urllib.parse import quote_plus, urljoin
 
 import requests
@@ -396,7 +397,9 @@ def main() -> int:
     if not dry_run:
         validate_config()
 
-    today = dt.date.today()
+    # 使用北京时间（Asia/Shanghai, UTC+8）确定"当天"，避免 GitHub Actions 的 UTC 偏差
+    BEIJING_TZ = timezone(timedelta(hours=8))
+    today = datetime.now(BEIJING_TZ).date()
     date_str = today.isoformat()
     print(f"[info] 日期: {date_str}，开始搜索…")
 
