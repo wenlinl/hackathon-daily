@@ -30,8 +30,8 @@ NOTION_VERSION = "2022-06-28"
 
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
-DB_2026_ID = "33660e0b0bbf8042961a000b805cbb91"           # 页面内 "2026" 数据库
-DB_TASKS_ID = "9a81ee99925544208ceb65bdf99a8703"          # "我的任务" 数据库
+DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（真实 ID，2026-08-08 确认）
+DB_TASKS_ID = "9a81ee99925544208ceb65bdf99a8703"          # "我的任务" 数据库（需用户分享给 integration）
 
 HEADERS = {
     "User-Agent": (
