@@ -413,6 +413,19 @@ def _labeled_block(block_type: str, label: str, content: str, warn: bool = False
     }
 
 
+def _link_block(block_type: str, label: str, text: str, url: str) -> dict:
+    """生成带文字链接的块：点击文字跳转，不直接展示长 URL。"""
+    rich = [
+        {"type": "text", "text": {"content": f"{label} "}, "annotations": {"bold": True}},
+        {"type": "text", "text": {"content": text, "link": {"url": url}}},
+    ]
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {"rich_text": rich},
+    }
+
+
 def write_daily_summary(date_str: str, events: list[Event]) -> str:
     """在 Daily Record 下创建当天的一篇整合笔记（Notion 原生格式）。"""
     title = f"{date_str} 黑客松活动汇总"
@@ -439,7 +452,7 @@ def write_daily_summary(date_str: str, events: list[Event]) -> str:
         if ev.host:
             children.append(_labeled_block("bulleted_list_item", "🏢 主办方", ev.host))
         if ev.url:
-            children.append(_labeled_block("bulleted_list_item", "🔗 来源链接", ev.url))
+            children.append(_link_block("bulleted_list_item", "🔗 来源链接", "查看详情", ev.url))
         if ev.snippet:
             children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180]))
     children.append(_text_block("heading_2", "说明"))
