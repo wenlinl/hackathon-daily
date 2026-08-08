@@ -31,7 +31,6 @@ NOTION_VERSION = "2022-06-28"
 
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
-DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（真实 ID，2026-08-08 确认）
 
 HEADERS = {
     "User-Agent": (
@@ -71,6 +70,28 @@ EXCLUDE_TITLE_HINTS = [
     "danh sách",
     "phường",
     "quận",
+    # 非黑客松活动的常见噪音（标题或摘要中出现即排除）
+    "美赛",
+    "ctb",
+    "牛津",
+    "夏校",
+    "研学",
+    "仲裁",
+    "招生简章",
+    "高研班",
+    "数据集",
+    "讲座",
+    "奖学金",
+    "夏令营",
+    "冬令营",
+    # 回顾/科普/招聘类（非可报名活动）
+    "回顾",
+    "收官",
+    "全景",
+    "是什么",
+    "招聘",
+    "岗位",
+    "科普",
 ]
 
 
@@ -281,76 +302,56 @@ def notion_headers() -> dict:
     }
 
 
-def notion_create_page(parent: dict, properties: dict, content: str | None = None) -> dict:
+def notion_create_page(parent: dict, properties: dict, children: list[dict] | None = None) -> dict:
     payload = {"parent": parent, "properties": properties}
-    if content:
-        payload["children"] = [
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": [{"type": "text", "text": {"content": content[:2000]}}]},
-            }
-        ]
+    if children:
+        payload["children"] = children
     resp = requests.post(f"{NOTION_API}/pages", headers=notion_headers(), json=payload, timeout=30)
     if resp.status_code not in (200, 201):
         raise RuntimeError(f"Notion 创建失败 {resp.status_code}: {resp.text[:500]}")
     return resp.json()
 
 
+def _text_block(block_type: str, text: str) -> dict:
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {"rich_text": [{"type": "text", "text": {"content": text}}]},
+    }
+
+
 def write_daily_summary(date_str: str, events: list[Event]) -> str:
-    """在 Daily Record 下创建当天汇总子页面，返回页面 URL。"""
+    """在 Daily Record 下创建当天的一篇整合笔记：汇总所有黑客松信息并附来源链接。"""
     title = f"{date_str} 黑客松活动汇总"
-    lines = [f"# {title}", "", f"共收录 {len(events)} 条活动信息。", ""]
+    children: list[dict] = [
+        _text_block("heading_1", title),
+        _text_block("paragraph", f"共收录 {len(events)} 条黑客松/编程马拉松相关信息（截至 {date_str}）。"),
+    ]
+    # 按来源分组，方便浏览
+    by_source: dict[str, list[Event]] = {}
     for ev in events:
-        lines.append(ev.as_markdown())
-        lines.append("")
-    content = "\n".join(lines)
+        by_source.setdefault(ev.source or "其他", []).append(ev)
+    for source, evs in by_source.items():
+        children.append(_text_block("heading_2", source))
+        for ev in evs:
+            item = f"{ev.title}（来源：{ev.source}；摘要：{ev.snippet[:120]}）"
+            if ev.url:
+                item += f" 链接：{ev.url}"
+            children.append(_text_block("bulleted_list_item", item[:1900]))
     page = notion_create_page(
         {"type": "page_id", "page_id": DAILY_RECORD_PAGE_ID},
         {"title": {"title": [{"type": "text", "text": {"content": title}}]}},
-        content=content,
+        children=children,
     )
     url = page.get("url", "")
     print(f"[ok] 已创建汇总页面: {url}")
     return url
 
 
-def write_events_to_2026(date_str: str, events: list[Event]) -> None:
-    """把活动条目写入 2026 数据库（名称、日期=当天）。"""
-    title_prop = find_title_property(DB_2026_ID)
-    print(f"[info] 2026 数据库标题属性: {title_prop}")
-    for ev in events:
-        properties = {
-            title_prop: {"title": [{"type": "text", "text": {"content": ev.title[:200]}}]},
-            "日期": {"date": {"start": date_str}},
-        }
-        try:
-            notion_create_page({"type": "database_id", "database_id": DB_2026_ID}, properties)
-            print(f"[ok] 2026 数据库已写入: {ev.title}")
-        except RuntimeError as exc:
-            print(f"[warn] 写入 2026 失败 {ev.title}: {exc}", file=sys.stderr)
-
-
 def validate_config() -> None:
     if not NOTION_TOKEN:
         print("[error] 缺少环境变量 NOTION_TOKEN", file=sys.stderr)
         sys.exit(2)
-
-
-def notion_database_schema(db_id: str) -> dict:
-    resp = requests.get(f"{NOTION_API}/databases/{db_id}", headers=notion_headers(), timeout=30)
-    if resp.status_code != 200:
-        raise RuntimeError(f"读取数据库 {db_id} 失败 {resp.status_code}: {resp.text[:500]}")
-    return resp.json()
-
-
-def find_title_property(db_id: str) -> str:
-    """找到数据库的标题属性名（不一定是 'title'）。"""
-    schema = notion_database_schema(db_id)
-    for name, prop in schema.get("properties", {}).items():
-        if prop.get("type") == "title":
-            return name
-    raise RuntimeError(f"数据库 {db_id} 没有标题属性")
 
 
 def check_notion() -> int:
@@ -367,15 +368,6 @@ def check_notion() -> int:
         return 1
     print("[ok] Daily Record 可访问")
 
-    for label, db_id in (("2026 数据库", DB_2026_ID),):
-        try:
-            schema = notion_database_schema(db_id)
-            props = {name: prop.get("type") for name, prop in schema.get("properties", {}).items()}
-            print(f"[ok] {label} 可访问，属性: {props}")
-        except RuntimeError as exc:
-            print(f"[error] {label}: {exc}", file=sys.stderr)
-            print(f"请确认：{label} 已分享给你的 Notion Integration。", file=sys.stderr)
-            return 1
     return 0
 
 
@@ -429,7 +421,6 @@ def main() -> int:
         print("[info] 今天没有搜到活动，仍然创建汇总页面")
 
     write_daily_summary(date_str, unique[:30])
-    write_events_to_2026(date_str, unique[:30])
     print("[done] 全部完成")
     return 0
 
