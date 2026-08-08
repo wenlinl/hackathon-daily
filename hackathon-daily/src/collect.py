@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -31,6 +32,19 @@ NOTION_VERSION = "2022-06-28"
 
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
+DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（日历视图所在）
+
+# 只展示今天起未来 N 天内的活动
+LOOKAHEAD_DAYS = 30
+
+# 常见城市/地点关键词（用于提取活动地点）
+CITY_HINTS = [
+    "北京", "上海", "广州", "深圳", "杭州", "成都", "南京", "武汉",
+    "西安", "长沙", "苏州", "香港", "张江", "顺德", "厦门", "合肥",
+    "重庆", "天津", "青岛", "大连", "郑州", "济南", "福州", "南昌",
+    "桂林", "贵阳", "昆明", "兰州", "西宁", "乌鲁木齐", "呼伦贝尔",
+    "Shenzhen", "Shanghai", "Beijing", "Hangzhou", "Chengdu",
+]
 
 HEADERS = {
     "User-Agent": (
@@ -108,22 +122,31 @@ class Event:
     deadline: str = ""
     published: str = ""
     host: str = ""
+    location: str = ""
+    signup_start: str = ""
+    signup_deadline: str = ""
+    competition_time: str = ""
     raw: dict = field(default_factory=dict)
 
     def as_markdown(self) -> str:
-        title_link = f"[{self.title}]({self.url})" if self.url else f"**{self.title}**"
-        meta = []
+        parts = [f"### {self.title}"]
+        if self.url:
+            parts.append(f"链接：{self.url}")
+        if self.competition_time:
+            parts.append(f"⏰ 竞赛时间：{self.competition_time}")
+        if self.location:
+            parts.append(f"📍 地点：{self.location}")
+        if self.signup_start:
+            parts.append(f"📝 报名时间：{self.signup_start}")
+        if self.signup_deadline:
+            parts.append(f"⏳ 报名截止：{self.signup_deadline}")
         if self.host:
-            meta.append(f"主办：{self.host}")
-        if self.deadline:
-            meta.append(f"截止：{self.deadline}")
-        if self.published:
-            meta.append(f"发布：{self.published}")
-        if self.source:
-            meta.append(f"来源：{self.source}")
+            parts.append(f"🏢 主办：{self.host}")
         if self.snippet:
-            meta.append(f"摘要：{self.snippet[:200]}")
-        return f"- {title_link}" + (f"（{'；'.join(meta)}）" if meta else "")
+            parts.append(f"摘要：{self.snippet[:180]}")
+        if self.source:
+            parts.append(f"来源：{self.source}")
+        return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -227,32 +250,6 @@ def search_sogou_weixin(query: str) -> list[Event]:
     return events
 
 
-def search_github(query: str = "hackathon") -> list[Event]:
-    """GitHub 上的 hackathon 活动仓库/讨论（公开信息）。"""
-    events: list[Event] = []
-    url = (
-        "https://api.github.com/search/repositories"
-        f"?q={quote_plus(query + ' hackathon')}&sort=updated&order=desc&per_page=10"
-    )
-    try:
-        resp = requests.get(url, headers={**HEADERS, "Accept": "application/vnd.github+json"}, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            for item in data.get("items", [])[:10]:
-                events.append(
-                    Event(
-                        title=item.get("name", ""),
-                        url=item.get("html_url", ""),
-                        source="GitHub",
-                        snippet=(item.get("description") or ""),
-                        published=(item.get("updated_at") or "")[:10],
-                    )
-                )
-    except (requests.RequestException, ValueError) as exc:
-        print(f"[warn] GitHub 搜索失败: {exc}", file=sys.stderr)
-    return events
-
-
 def search_all() -> list[Event]:
     seen: set[str] = set()
     results: list[Event] = []
@@ -270,12 +267,6 @@ def search_all() -> list[Event]:
                 seen.add(key)
                 results.append(ev)
             time.sleep(1)
-    # 附加 GitHub 公开仓库信息
-    for ev in search_github():
-        key = (ev.title or "").strip().lower()
-        if key and key not in seen:
-            seen.add(key)
-            results.append(ev)
     return results
 
 
@@ -288,6 +279,91 @@ def is_relevant(ev: Event) -> bool:
     if any(h in (ev.title or "").lower() for h in EXCLUDE_TITLE_HINTS):
         return False
     return True
+
+
+def extract_dates(text: str, year: int) -> list[dt.date]:
+    """从文本中提取日期（支持 2026年8月10日 / 8月10日 / 2026-08-10 / 8.10 等）。"""
+    found: list[dt.date] = []
+    patterns = [
+        r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?",
+        r"(\d{1,2})\s*月\s*(\d{1,2})\s*日",
+        r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})",
+        r"(\d{1,2})[-/.月](\d{1,2})日?",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, text):
+            try:
+                if len(m.groups()) == 3:
+                    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                else:
+                    y, mo, d = year, int(m.group(1)), int(m.group(2))
+                found.append(dt.date(y, mo, d))
+            except ValueError:
+                continue
+    return found
+
+
+def extract_fields(ev: Event, today: dt.date) -> None:
+    """从标题+摘要中尽力提取地点、报名截止、竞赛时间等字段。"""
+    text = f"{ev.title}。{ev.snippet}"
+    year = today.year
+
+    # 地点：优先“地点：xx”或“在XX举办/举行”，否则匹配常见城市
+    loc_match = re.search(r"(?:地点|地址|城市)\s*[:：]\s*([^，。;；、]{2,12})", text)
+    if loc_match:
+        ev.location = loc_match.group(1).strip()
+    if not ev.location:
+        for city in CITY_HINTS:
+            if city in text:
+                ev.location = city
+                break
+
+    # 报名截止：优先“报名截止[:：]日期/时间”，否则取报名相关的最近未来日期
+    dl_match = re.search(r"报名[^。；;]{0,8}截止[^。；;]{0,20}", text)
+    if dl_match:
+        seg = dl_match.group(0)
+        dates = extract_dates(seg, year)
+        if dates:
+            future = [d for d in dates if d >= today]
+            ev.signup_deadline = (future[0] if future else dates[-1]).strftime("%Y-%m-%d")
+    if not ev.signup_deadline:
+        dates = extract_dates(text, year)
+        future = [d for d in dates if today <= d <= today + dt.timedelta(days=LOOKAHEAD_DAYS)]
+        if future:
+            ev.signup_deadline = f"约 {future[0].strftime('%m-%d')}"
+
+    # 竞赛时间：优先“比赛/竞赛时间”，否则取标题/摘要中最早的未来日期
+    time_match = re.search(r"(?:比赛|竞赛|活动|大赛)\s*时间\s*[:：]?\s*([^。；;，,]{2,20})", text)
+    if time_match:
+        ev.competition_time = time_match.group(1).strip()
+    if not ev.competition_time:
+        dates = extract_dates(text, year)
+        future = [d for d in dates if today <= d <= today + dt.timedelta(days=LOOKAHEAD_DAYS)]
+        if future:
+            ev.competition_time = future[0].strftime("%Y-%m-%d")
+
+    # 报名时间（开始）
+    start_match = re.search(r"报名[^。；;]{0,4}(?:开启|开始|启动|开放)[^。；;]{0,16}", text)
+    if start_match:
+        seg = start_match.group(0)
+        dates = extract_dates(seg, year)
+        if dates:
+            ev.signup_start = dates[0].strftime("%Y-%m-%d")
+    if not ev.signup_start and ev.signup_deadline:
+        ev.signup_start = "见原文"
+
+
+def is_in_future_window(ev: Event, today: dt.date, days: int = LOOKAHEAD_DAYS) -> bool:
+    """只保留今天起未来 days 天内的活动；无法判断日期的一律保留并标记。"""
+    text = f"{ev.title}。{ev.snippet}"
+    dates = extract_dates(text, today.year)
+    if not dates:
+        return True  # 无法判断日期，保留（人工确认）
+    # 只要存在一个日期在今天~未来 days 天内，就保留
+    if any(today <= d <= today + dt.timedelta(days=days) for d in dates):
+        return True
+    # 全是过去日期 → 剔除；全部未来但超出窗口 → 剔除
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -320,24 +396,65 @@ def _text_block(block_type: str, text: str) -> dict:
     }
 
 
-def write_daily_summary(date_str: str, events: list[Event]) -> str:
-    """在 Daily Record 下创建当天的一篇整合笔记：汇总所有黑客松信息并附来源链接。"""
-    title = f"{date_str} 黑客松活动汇总"
-    children: list[dict] = [
-        _text_block("heading_1", title),
-        _text_block("paragraph", f"共收录 {len(events)} 条黑客松/编程马拉松相关信息（截至 {date_str}）。"),
+def _rich_text(content: str, bold: bool = False, code: bool = False) -> list[dict]:
+    return [{"type": "text", "text": {"content": content}, "annotations": {"bold": bold, "code": code}}]
+
+
+def _labeled_block(block_type: str, label: str, content: str, warn: bool = False) -> dict:
+    prefix = "⚠️ " if warn else ""
+    rich = [
+        {"type": "text", "text": {"content": f"{prefix}{label} "}, "annotations": {"bold": True}},
+        {"type": "text", "text": {"content": content}},
     ]
-    # 按来源分组，方便浏览
-    by_source: dict[str, list[Event]] = {}
-    for ev in events:
-        by_source.setdefault(ev.source or "其他", []).append(ev)
-    for source, evs in by_source.items():
-        children.append(_text_block("heading_2", source))
-        for ev in evs:
-            item = f"{ev.title}（来源：{ev.source}；摘要：{ev.snippet[:120]}）"
-            if ev.url:
-                item += f" 链接：{ev.url}"
-            children.append(_text_block("bulleted_list_item", item[:1900]))
+    return {
+        "object": "block",
+        "type": block_type,
+        block_type: {"rich_text": rich},
+    }
+
+
+def write_daily_summary(date_str: str, events: list[Event]) -> str:
+    """在 Daily Record 下创建当天的一篇整合笔记（Notion 原生格式）。"""
+    title = f"{date_str} 黑客松活动汇总"
+    children: list[dict] = []
+    children.append(_text_block("heading_1", title))
+    children.append(
+        _text_block(
+            "paragraph",
+            f"**概览**：共收录 {len(events)} 条活动，覆盖 {date_str} 起未来 30 天内的黑客松/编程马拉松信息。",
+        )
+    )
+    children.append(_text_block("heading_2", "活动总览"))
+    for i, ev in enumerate(events, 1):
+        children.append(_text_block("heading_3", f"{i}. {ev.title}"))
+        # 字段列表
+        if ev.competition_time:
+            children.append(_labeled_block("bulleted_list_item", "⏰ 竞赛时间", ev.competition_time))
+        if ev.location:
+            children.append(_labeled_block("bulleted_list_item", "📍 地点", ev.location))
+        if ev.signup_start and ev.signup_start != "见原文":
+            children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start))
+        if ev.signup_deadline:
+            children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline))
+        if ev.host:
+            children.append(_labeled_block("bulleted_list_item", "🏢 主办方", ev.host))
+        if ev.url:
+            children.append(_labeled_block("bulleted_list_item", "🔗 来源链接", ev.url))
+        if ev.snippet:
+            children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180]))
+    children.append(_text_block("heading_2", "说明"))
+    children.append(
+        _text_block(
+            "bulleted_list_item",
+            "⚠️ 时间、地点等字段由搜索引擎摘要自动提取，请以报名页面为准。",
+        )
+    )
+    children.append(
+        _text_block(
+            "bulleted_list_item",
+            "💡 点击来源链接可查看完整报名信息；无法判断日期的条目已保留供人工确认。",
+        )
+    )
     page = notion_create_page(
         {"type": "page_id", "page_id": DAILY_RECORD_PAGE_ID},
         {"title": {"title": [{"type": "text", "text": {"content": title}}]}},
@@ -346,6 +463,27 @@ def write_daily_summary(date_str: str, events: list[Event]) -> str:
     url = page.get("url", "")
     print(f"[ok] 已创建汇总页面: {url}")
     return url
+
+
+def write_to_calendar(date_str: str, events: list[Event]) -> None:
+    """把当天汇总写入 2026 数据库（日期=当天），使其出现在 Notion 日历中。"""
+    title_prop = "名称"  # 2026 数据库标题属性（已验证）
+    properties = {
+        title_prop: {
+            "title": [
+                {
+                    "type": "text",
+                    "text": {"content": f"{date_str} 黑客松活动汇总（{len(events)} 条）"},
+                }
+            ]
+        },
+        "日期": {"date": {"start": date_str}},
+    }
+    try:
+        notion_create_page({"type": "database_id", "database_id": DB_2026_ID}, properties)
+        print(f"[ok] 已写入 2026 数据库日历: {date_str}")
+    except RuntimeError as exc:
+        print(f"[warn] 写入 2026 数据库失败: {exc}", file=sys.stderr)
 
 
 def validate_config() -> None:
@@ -406,9 +544,14 @@ def main() -> int:
             seen.add(key)
             unique.append(ev)
 
-    print(f"[info] 共收集 {len(unique)} 条活动")
+    # 只保留今天起未来 30 天内的活动，并提取时间/地点等字段
+    unique = [ev for ev in unique if is_in_future_window(ev, today)]
+    for ev in unique:
+        extract_fields(ev, today)
+
+    print(f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内）")
     for ev in unique[:30]:
-        print("  -", ev.title, "|", ev.url)
+        print(f"  - {ev.title} | {ev.location or '地点待确认'} | {ev.signup_deadline or '截止待确认'}")
 
     if dry_run:
         print("\n[dry-run] 以下为将写入 Notion 的汇总：")
@@ -418,9 +561,10 @@ def main() -> int:
         return 0
 
     if not unique:
-        print("[info] 今天没有搜到活动，仍然创建汇总页面")
+        print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
     write_daily_summary(date_str, unique[:30])
+    write_to_calendar(date_str, unique[:30])
     print("[done] 全部完成")
     return 0
 
