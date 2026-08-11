@@ -560,8 +560,8 @@ def write_to_calendar(date_str: str, note_url: str, count: int) -> None:
                 date = p["date"].get("start", "")
         if title and date:
             existing_keys.add((title.strip(), date))
-        # 旧的“当天汇总”条目，自动归档
-        if title.strip().endswith("黑客松活动汇总）") or "黑客松活动汇总（" in title:
+        # 旧的“当天汇总”条目（含带/不带条数后缀），自动归档
+        if "黑客松活动汇总" in title:
             summary_ids.append(row["id"])
 
     for pid in summary_ids:
