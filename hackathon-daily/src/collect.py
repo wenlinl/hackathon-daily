@@ -131,22 +131,12 @@ class Event:
 
     def as_markdown(self) -> str:
         parts = [f"### {self.title}"]
-        if self.url:
-            parts.append(f"链接：{self.url}")
-        if self.competition_time:
-            parts.append(f"⏰ 竞赛时间：{self.competition_time}")
-        if self.location:
-            parts.append(f"📍 地点：{self.location}")
-        if self.signup_start:
-            parts.append(f"📝 报名时间：{self.signup_start}")
-        if self.signup_deadline:
-            parts.append(f"⏳ 报名截止：{self.signup_deadline}")
-        if self.host:
-            parts.append(f"🏢 主办：{self.host}")
-        if self.snippet:
-            parts.append(f"摘要：{self.snippet[:180]}")
-        if self.source:
-            parts.append(f"来源：{self.source}")
+        parts.append(f"📝 报名时间：{self.signup_start or '待确认'}")
+        parts.append(f"⏳ 报名截止：{self.signup_deadline or '待确认'}")
+        parts.append(f"⏰ 竞赛时间：{self.competition_time or '待确认'}")
+        parts.append(f"📍 地点：{self.location or '待确认'}")
+        parts.append(f"摘要：{self.snippet[:180] if self.snippet else '待确认'}")
+        parts.append(f"🔗 链接：{self.url if self.url else '待确认'}")
         return "\n".join(parts)
 
 
@@ -334,25 +324,39 @@ def extract_fields(ev: Event, today: dt.date) -> None:
         if future:
             ev.signup_deadline = f"约 {future[0].strftime('%m-%d')}"
 
-    # 竞赛时间：优先“比赛/竞赛时间”，否则取标题/摘要中最早的未来日期
-    time_match = re.search(r"(?:比赛|竞赛|活动|大赛)\s*时间\s*[:：]?\s*([^。；;，,]{2,20})", text)
+    # 竞赛时间：优先“比赛/竞赛时间”后的日期区间，保留原文区间（如 8月8日—9日）
+    time_match = re.search(r"(?:比赛|竞赛|活动|大赛)\s*时间\s*[:：]?\s*([^。；;]{2,24})", text)
     if time_match:
-        ev.competition_time = time_match.group(1).strip()
+        ev.competition_time = time_match.group(1).strip().rstrip("，, ")
+    if not ev.competition_time:
+        # 提取形如“8月8日—9日”“8.8-8.9”的日期区间
+        range_match = re.search(
+            r"(\d{1,2})\s*月\s*(\d{1,2})\s*日?\s*[—\-~至到]\s*(\d{1,2})\s*日?",
+            text,
+        )
+        if range_match:
+            ev.competition_time = (
+                f"{range_match.group(1)}月{range_match.group(2)}日"
+                f"—{range_match.group(3)}日"
+            )
     if not ev.competition_time:
         dates = extract_dates(text, year)
         future = [d for d in dates if today <= d <= today + dt.timedelta(days=LOOKAHEAD_DAYS)]
         if future:
             ev.competition_time = future[0].strftime("%Y-%m-%d")
 
-    # 报名时间（开始）
-    start_match = re.search(r"报名[^。；;]{0,4}(?:开启|开始|启动|开放)[^。；;]{0,16}", text)
+    # 报名时间（开始）：优先“报名时间/报名开启/开始报名”，保留原文
+    start_match = re.search(
+        r"(?:报名\s*时间|报名[^。；;]{0,4}(?:开启|开始|启动|开放))[^。；;]{0,24}",
+        text,
+    )
     if start_match:
-        seg = start_match.group(0)
-        dates = extract_dates(seg, year)
-        if dates:
-            ev.signup_start = dates[0].strftime("%Y-%m-%d")
-    if not ev.signup_start and ev.signup_deadline:
-        ev.signup_start = "见原文"
+        ev.signup_start = start_match.group(0).strip()
+    if not ev.signup_start:
+        dates = extract_dates(text, year)
+        future = [d for d in dates if today <= d <= today + dt.timedelta(days=LOOKAHEAD_DAYS)]
+        if future:
+            ev.signup_start = f"约 {future[0].strftime('%m-%d')}"
 
     # 日历日期：优先竞赛时间，其次报名截止，最后取最早的未来日期；都没有则用今天
     for seg in (ev.competition_time, ev.signup_deadline):
@@ -458,21 +462,16 @@ def write_daily_summary(date_str: str, events: list[Event]) -> str:
     children.append(_text_block("heading_2", "活动总览"))
     for i, ev in enumerate(events, 1):
         children.append(_text_block("heading_3", f"{i}. {ev.title}"))
-        # 字段列表
-        if ev.competition_time:
-            children.append(_labeled_block("bulleted_list_item", "⏰ 竞赛时间", ev.competition_time))
-        if ev.location:
-            children.append(_labeled_block("bulleted_list_item", "📍 地点", ev.location))
-        if ev.signup_start and ev.signup_start != "见原文":
-            children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start))
-        if ev.signup_deadline:
-            children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline))
-        if ev.host:
-            children.append(_labeled_block("bulleted_list_item", "🏢 主办方", ev.host))
+        # 字段列表：固定顺序 + 统一占位，保证标准格式
+        children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start or "待确认"))
+        children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline or "待确认"))
+        children.append(_labeled_block("bulleted_list_item", "⏰ 竞赛时间", ev.competition_time or "待确认"))
+        children.append(_labeled_block("bulleted_list_item", "📍 地点", ev.location or "待确认"))
+        children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180] if ev.snippet else "待确认"))
         if ev.url:
-            children.append(_link_block("bulleted_list_item", "🔗 来源链接", "查看详情", ev.url))
-        if ev.snippet:
-            children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180]))
+            children.append(_link_block("bulleted_list_item", "🔗 链接", "查看详情", ev.url))
+        else:
+            children.append(_labeled_block("bulleted_list_item", "🔗 链接", "待确认"))
     children.append(_text_block("heading_2", "说明"))
     children.append(
         _text_block(
