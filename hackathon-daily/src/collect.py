@@ -462,11 +462,9 @@ def _link_block(block_type: str, label: str, text: str, url: str) -> dict:
     }
 
 
-def write_daily_summary(date_str: str, events: list[Event]) -> str:
-    """在 Daily Record 下创建当天的一篇整合笔记（Notion 原生格式）。"""
-    title = f"{date_str} 黑客松活动汇总"
+def build_summary_children(date_str: str, events: list[Event]) -> list[dict]:
+    """构建当天汇总的 Notion 子块（直接写入数据库记录正文）。"""
     children: list[dict] = []
-    children.append(_text_block("heading_1", title))
     children.append(
         _text_block(
             "paragraph",
@@ -499,19 +497,7 @@ def write_daily_summary(date_str: str, events: list[Event]) -> str:
             "💡 点击来源链接可查看完整报名信息；无法判断日期的条目已保留供人工确认。",
         )
     )
-    # 首批最多 90 个块，剩余追加（Notion 单次创建上限 100）
-    first_batch = children[:90]
-    rest = children[90:]
-    page = notion_create_page(
-        {"type": "page_id", "page_id": DAILY_RECORD_PAGE_ID},
-        {"title": {"title": [{"type": "text", "text": {"content": title}}]}},
-        children=first_batch,
-    )
-    if rest:
-        notion_append_children(page["id"], rest)
-    url = page.get("url", "")
-    print(f"[ok] 已创建汇总页面: {url}")
-    return url
+    return children
 
 
 def query_database_rows(db_id: str) -> list[dict]:
@@ -538,8 +524,8 @@ def query_database_rows(db_id: str) -> list[dict]:
     return rows
 
 
-def write_to_calendar(date_str: str, note_url: str, count: int) -> None:
-    """把当天汇总 note 作为一条记录写入 2026 数据库，日期=当天，点击可跳转到 note。"""
+def write_to_calendar(date_str: str, events: list[Event]) -> None:
+    """把当天汇总直接写入 2026 数据库（日历视图）当天记录，正文包含全部活动详情。"""
     title_prop = "名称"  # 2026 数据库标题属性（已验证）
     try:
         existing = query_database_rows(DB_2026_ID)
@@ -577,25 +563,28 @@ def write_to_calendar(date_str: str, note_url: str, count: int) -> None:
         except requests.RequestException as exc:
             print(f"[warn] 归档旧条目失败 {pid}: {exc}", file=sys.stderr)
 
-    title = f"{date_str} 黑客松活动汇总（{count} 条）"
+    title = f"{date_str} 黑客松活动汇总（{len(events)} 条）"
     if (title, date_str) in existing_keys:
         print(f"[skip] 日历已存在: {title} @ {date_str}")
         return
-    # 名称 = 汇总标题，内嵌链接跳转到 Daily Record 下的 note
+    children = build_summary_children(date_str, events)
+    first_batch = children[:90]
+    rest = children[90:]
     properties = {
         title_prop: {
-            "title": [
-                {
-                    "type": "text",
-                    "text": {"content": title, "link": {"url": note_url}} if note_url else {"content": title},
-                }
-            ]
+            "title": [{"type": "text", "text": {"content": title}}]
         },
         "日期": {"date": {"start": date_str}},
     }
     try:
-        notion_create_page({"type": "database_id", "database_id": DB_2026_ID}, properties)
-        print(f"[ok] 日历写入汇总 note: {title} @ {date_str}")
+        page = notion_create_page(
+            {"type": "database_id", "database_id": DB_2026_ID},
+            properties,
+            children=first_batch,
+        )
+        if rest:
+            notion_append_children(page["id"], rest)
+        print(f"[ok] 日历写入汇总（含正文）: {title} @ {date_str}")
     except RuntimeError as exc:
         print(f"[warn] 日历写入失败: {exc}", file=sys.stderr)
 
@@ -681,8 +670,7 @@ def main() -> int:
     if not unique:
         print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
-    note_url = write_daily_summary(date_str, unique[:30])
-    write_to_calendar(date_str, note_url, len(unique[:30]))
+    write_to_calendar(date_str, unique[:30])
     print("[done] 全部完成")
     return 0
 
