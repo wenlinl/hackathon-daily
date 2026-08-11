@@ -520,8 +520,8 @@ def query_database_rows(db_id: str) -> list[dict]:
     return rows
 
 
-def write_to_calendar(events: list[Event]) -> None:
-    """把每条活动写入 2026 数据库，日期=该活动对应的日历日期（竞赛/报名截止日）。"""
+def write_to_calendar(date_str: str, note_url: str, count: int) -> None:
+    """把当天汇总 note 作为一条记录写入 2026 数据库，日期=当天，点击可跳转到 note。"""
     title_prop = "名称"  # 2026 数据库标题属性（已验证）
     try:
         existing = query_database_rows(DB_2026_ID)
@@ -559,26 +559,27 @@ def write_to_calendar(events: list[Event]) -> None:
         except requests.RequestException as exc:
             print(f"[warn] 归档旧条目失败 {pid}: {exc}", file=sys.stderr)
 
-    written = 0
-    for ev in events:
-        title = (ev.title or "").strip()[:190]
-        date = ev.calendar_date or ""
-        if not title or not date:
-            continue
-        if (title, date) in existing_keys:
-            print(f"[skip] 日历已存在: {title[:40]} @ {date}")
-            continue
-        properties = {
-            title_prop: {"title": [{"type": "text", "text": {"content": title}}]},
-            "日期": {"date": {"start": date}},
-        }
-        try:
-            notion_create_page({"type": "database_id", "database_id": DB_2026_ID}, properties)
-            print(f"[ok] 日历写入: {title[:40]} @ {date}")
-            written += 1
-        except RuntimeError as exc:
-            print(f"[warn] 日历写入失败 {title[:40]}: {exc}", file=sys.stderr)
-    print(f"[info] 日历共写入 {written} 条")
+    title = f"{date_str} 黑客松活动汇总（{count} 条）"
+    if (title, date_str) in existing_keys:
+        print(f"[skip] 日历已存在: {title} @ {date_str}")
+        return
+    # 名称 = 汇总标题，内嵌链接跳转到 Daily Record 下的 note
+    properties = {
+        title_prop: {
+            "title": [
+                {
+                    "type": "text",
+                    "text": {"content": title, "link": {"url": note_url}} if note_url else {"content": title},
+                }
+            ]
+        },
+        "日期": {"date": {"start": date_str}},
+    }
+    try:
+        notion_create_page({"type": "database_id", "database_id": DB_2026_ID}, properties)
+        print(f"[ok] 日历写入汇总 note: {title} @ {date_str}")
+    except RuntimeError as exc:
+        print(f"[warn] 日历写入失败: {exc}", file=sys.stderr)
 
 
 def validate_config() -> None:
@@ -662,8 +663,8 @@ def main() -> int:
     if not unique:
         print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
-    write_daily_summary(date_str, unique[:30])
-    write_to_calendar(unique[:30])
+    note_url = write_daily_summary(date_str, unique[:30])
+    write_to_calendar(date_str, note_url, len(unique[:30]))
     print("[done] 全部完成")
     return 0
 
