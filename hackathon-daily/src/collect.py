@@ -126,6 +126,7 @@ class Event:
     signup_start: str = ""
     signup_deadline: str = ""
     competition_time: str = ""
+    calendar_date: str = ""  # 写入日历数据库用的日期（YYYY-MM-DD）
     raw: dict = field(default_factory=dict)
 
     def as_markdown(self) -> str:
@@ -307,6 +308,7 @@ def extract_fields(ev: Event, today: dt.date) -> None:
     """从标题+摘要中尽力提取地点、报名截止、竞赛时间等字段。"""
     text = f"{ev.title}。{ev.snippet}"
     year = today.year
+    window_end = today + dt.timedelta(days=LOOKAHEAD_DAYS)
 
     # 地点：优先“地点：xx”或“在XX举办/举行”，否则匹配常见城市
     loc_match = re.search(r"(?:地点|地址|城市)\s*[:：]\s*([^，。;；、]{2,12})", text)
@@ -351,6 +353,22 @@ def extract_fields(ev: Event, today: dt.date) -> None:
             ev.signup_start = dates[0].strftime("%Y-%m-%d")
     if not ev.signup_start and ev.signup_deadline:
         ev.signup_start = "见原文"
+
+    # 日历日期：优先竞赛时间，其次报名截止，最后取最早的未来日期；都没有则用今天
+    for seg in (ev.competition_time, ev.signup_deadline):
+        if seg and "见原文" not in seg and "约 " not in seg:
+            dates = extract_dates(seg, year)
+            future = [d for d in dates if today <= d <= window_end]
+            if future:
+                ev.calendar_date = future[0].strftime("%Y-%m-%d")
+                break
+    if not ev.calendar_date:
+        dates = extract_dates(text, year)
+        future = [d for d in dates if today <= d <= window_end]
+        if future:
+            ev.calendar_date = future[0].strftime("%Y-%m-%d")
+        else:
+            ev.calendar_date = today.strftime("%Y-%m-%d")
 
 
 def is_in_future_window(ev: Event, today: dt.date, days: int = LOOKAHEAD_DAYS) -> bool:
@@ -478,25 +496,89 @@ def write_daily_summary(date_str: str, events: list[Event]) -> str:
     return url
 
 
-def write_to_calendar(date_str: str, events: list[Event]) -> None:
-    """把当天汇总写入 2026 数据库（日期=当天），使其出现在 Notion 日历中。"""
+def query_database_rows(db_id: str) -> list[dict]:
+    """查询数据库现有行，用于去重。"""
+    rows: list[dict] = []
+    cursor = None
+    while True:
+        payload: dict = {"page_size": 100}
+        if cursor:
+            payload["start_cursor"] = cursor
+        resp = requests.post(
+            f"{NOTION_API}/databases/{db_id}/query",
+            headers=notion_headers(),
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"查询数据库 {db_id} 失败 {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        rows.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+    return rows
+
+
+def write_to_calendar(events: list[Event]) -> None:
+    """把每条活动写入 2026 数据库，日期=该活动对应的日历日期（竞赛/报名截止日）。"""
     title_prop = "名称"  # 2026 数据库标题属性（已验证）
-    properties = {
-        title_prop: {
-            "title": [
-                {
-                    "type": "text",
-                    "text": {"content": f"{date_str} 黑客松活动汇总（{len(events)} 条）"},
-                }
-            ]
-        },
-        "日期": {"date": {"start": date_str}},
-    }
     try:
-        notion_create_page({"type": "database_id", "database_id": DB_2026_ID}, properties)
-        print(f"[ok] 已写入 2026 数据库日历: {date_str}")
+        existing = query_database_rows(DB_2026_ID)
     except RuntimeError as exc:
-        print(f"[warn] 写入 2026 数据库失败: {exc}", file=sys.stderr)
+        print(f"[warn] 无法查询 2026 数据库，跳过日历写入: {exc}", file=sys.stderr)
+        return
+
+    existing_keys: set[tuple[str, str]] = set()
+    summary_ids: list[str] = []
+    for row in existing:
+        props = row.get("properties", {})
+        title = ""
+        date = ""
+        for p in props.values():
+            if p.get("type") == "title":
+                title = "".join(t.get("plain_text", "") for t in p.get("title", []))
+            if p.get("type") == "date" and p.get("date"):
+                date = p["date"].get("start", "")
+        if title and date:
+            existing_keys.add((title.strip(), date))
+        # 旧的“当天汇总”条目，自动归档
+        if title.strip().endswith("黑客松活动汇总）") or "黑客松活动汇总（" in title:
+            summary_ids.append(row["id"])
+
+    for pid in summary_ids:
+        try:
+            resp = requests.patch(
+                f"{NOTION_API}/pages/{pid}",
+                headers=notion_headers(),
+                json={"archived": True},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                print(f"[ok] 已归档旧汇总日历条目 {pid}")
+        except requests.RequestException as exc:
+            print(f"[warn] 归档旧条目失败 {pid}: {exc}", file=sys.stderr)
+
+    written = 0
+    for ev in events:
+        title = (ev.title or "").strip()[:190]
+        date = ev.calendar_date or ""
+        if not title or not date:
+            continue
+        if (title, date) in existing_keys:
+            print(f"[skip] 日历已存在: {title[:40]} @ {date}")
+            continue
+        properties = {
+            title_prop: {"title": [{"type": "text", "text": {"content": title}}]},
+            "日期": {"date": {"start": date}},
+        }
+        try:
+            notion_create_page({"type": "database_id", "database_id": DB_2026_ID}, properties)
+            print(f"[ok] 日历写入: {title[:40]} @ {date}")
+            written += 1
+        except RuntimeError as exc:
+            print(f"[warn] 日历写入失败 {title[:40]}: {exc}", file=sys.stderr)
+    print(f"[info] 日历共写入 {written} 条")
 
 
 def validate_config() -> None:
@@ -564,20 +646,24 @@ def main() -> int:
 
     print(f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内）")
     for ev in unique[:30]:
-        print(f"  - {ev.title} | {ev.location or '地点待确认'} | {ev.signup_deadline or '截止待确认'}")
+        print(
+            f"  - {ev.title} | {ev.location or '地点待确认'} | "
+            f"{ev.signup_deadline or '截止待确认'} | 日历:{ev.calendar_date}"
+        )
 
     if dry_run:
         print("\n[dry-run] 以下为将写入 Notion 的汇总：")
         print(f"# {date_str} 黑客松活动汇总")
         for ev in unique[:30]:
             print(ev.as_markdown())
+            print(f"  日历日期：{ev.calendar_date}")
         return 0
 
     if not unique:
         print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
     write_daily_summary(date_str, unique[:30])
-    write_to_calendar(date_str, unique[:30])
+    write_to_calendar(unique[:30])
     print("[done] 全部完成")
     return 0
 
