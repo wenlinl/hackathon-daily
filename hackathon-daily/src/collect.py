@@ -410,6 +410,20 @@ def notion_create_page(parent: dict, properties: dict, children: list[dict] | No
     return resp.json()
 
 
+def notion_append_children(page_id: str, children: list[dict]) -> None:
+    """向已有页面分批追加子块（Notion 单次上限 100 个）。"""
+    for i in range(0, len(children), 90):
+        batch = children[i : i + 90]
+        resp = requests.patch(
+            f"{NOTION_API}/blocks/{page_id}/children",
+            headers=notion_headers(),
+            json={"children": batch},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Notion 追加块失败 {resp.status_code}: {resp.text[:500]}")
+
+
 def _text_block(block_type: str, text: str) -> dict:
     return {
         "object": "block",
@@ -485,11 +499,16 @@ def write_daily_summary(date_str: str, events: list[Event]) -> str:
             "💡 点击来源链接可查看完整报名信息；无法判断日期的条目已保留供人工确认。",
         )
     )
+    # 首批最多 90 个块，剩余追加（Notion 单次创建上限 100）
+    first_batch = children[:90]
+    rest = children[90:]
     page = notion_create_page(
         {"type": "page_id", "page_id": DAILY_RECORD_PAGE_ID},
         {"title": {"title": [{"type": "text", "text": {"content": title}}]}},
-        children=children,
+        children=first_batch,
     )
+    if rest:
+        notion_append_children(page["id"], rest)
     url = page.get("url", "")
     print(f"[ok] 已创建汇总页面: {url}")
     return url
