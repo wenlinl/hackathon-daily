@@ -87,14 +87,13 @@ BREADTH_FIELDS = "f14,f113,f114,f115"
 WATCHLIST_PATH = ""
 SOURCE = "auto"
 
-# 指数 thscode（同花顺官方）：(.SH/.SZ/.BJ)
+# 指数 thscode（同花顺官方）：仅支持 .SH/.SZ；北证50 不支持，由东方财富补充
 THS_INDICES = [
     ("000001.SH", "上证指数"),
     ("399001.SZ", "深证成指"),
     ("399006.SZ", "创业板指"),
     ("000688.SH", "科创50"),
     ("000300.SH", "沪深300"),
-    ("899050.BJ", "北证50"),
 ]
 
 
@@ -468,21 +467,29 @@ def ths_get(path: str, params: dict | None = None) -> dict | None:
     """同花顺官方 REST 请求：X-api-key 鉴权，code==0 才算成功。"""
     if not THS_API_KEY:
         return None
-    try:
-        resp = requests.get(
-            f"{THS_BASE}{path}",
-            params=params,
-            headers={**HEADERS, "X-api-key": THS_API_KEY},
-            timeout=20,
-        )
-        if resp.status_code != 200:
-            return None
-        body = resp.json()
-        if body.get("code") != 0:
-            return None
-        return body.get("data")
-    except Exception:
-        return None
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                f"{THS_BASE}{path}",
+                params=params,
+                headers={**HEADERS, "X-api-key": THS_API_KEY},
+                timeout=20,
+            )
+            if resp.status_code != 200:
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            body = resp.json()
+            if body.get("code") != 0:
+                if body.get("code") == 4001:  # 限流：退避重试
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                # 其他业务错误（参数/权限/数据未就绪）直接降级
+                return None
+            return body.get("data")
+        except Exception:
+            pass
+        time.sleep(2.0 * (attempt + 1))
+    return None
 
 
 def _ths_code(code: str) -> str:
@@ -499,16 +506,17 @@ def ths_fetch_indices() -> list[Quote]:
     data = ths_get("/api/a-share-index/prices/snapshot", {"thscodes": codes})
     if not data:
         return []
-    name_map = {c.split(".")[0]: n for c, n in THS_INDICES}
+    name_map = {c: n for c, n in THS_INDICES}
     items: list[Quote] = []
     for d in data.get("item") or []:
-        ticker = str(d.get("ticker") or "")
-        if not ticker:
+        thscode = str(d.get("thscode") or "")
+        if not thscode:
             continue
+        code = thscode.split(".")[0]
         items.append(
             Quote(
-                code=ticker,
-                name=name_map.get(ticker, ticker),
+                code=code,
+                name=name_map.get(thscode, str(d.get("ticker") or code)),
                 price=d.get("last_price"),
                 pct=d.get("price_change_ratio_pct"),
                 change=d.get("price_change"),
@@ -597,7 +605,14 @@ def ths_fetch_lhb() -> tuple[str, list[LHBItem]]:
         )
         for x in rows
     ]
-    return str(data.get("trade_date") or ""), items
+    # 同一股票可能多条上榜记录，按代码去重
+    seen: set[str] = set()
+    deduped: list[LHBItem] = []
+    for it in items:
+        if it.code and it.code not in seen:
+            seen.add(it.code)
+            deduped.append(it)
+    return str(data.get("trade_date") or ""), deduped
 
 
 def ths_fetch_hot() -> list[HotStock]:
@@ -1065,6 +1080,12 @@ def collect() -> Report:
         if use_ths:
             print("[info] 同花顺指数获取失败，回退东方财富")
         r.indices = fetch_indices()
+    elif use_ths:
+        # 北证50 同花顺不支持，用东方财富补上
+        em_quotes = fetch_indices()
+        bj = next((q for q in em_quotes if q.code == "899050"), None)
+        if bj:
+            r.indices.append(bj)
     time.sleep(REQUEST_GAP)
 
     print("[2/7] 拉取涨跌家数…")
