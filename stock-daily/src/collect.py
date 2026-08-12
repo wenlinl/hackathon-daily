@@ -969,8 +969,8 @@ def write_to_database(r: Report) -> None:
         print(f"[warn] 无法查询数据库，跳过写入: {exc}", file=sys.stderr)
         return
 
-    summary_ids: list[str] = []
     existing_keys: set[tuple[str, str]] = set()
+    rows_info: list[tuple[str, str, str]] = []
     for row in existing:
         props = row.get("properties", {})
         title, date = "", ""
@@ -981,9 +981,16 @@ def write_to_database(r: Report) -> None:
                 date = p["date"].get("start", "")
         if title and date:
             existing_keys.add((title.strip(), date))
-        if "股市复盘" in title:
-            summary_ids.append(row["id"])
+        rows_info.append((title.strip(), date, row["id"]))
 
+    title = f"{r.date} 股市复盘与自选股"
+    # 当日记录已存在：直接跳过，不归档、不重复创建
+    if (title, r.date) in existing_keys:
+        print(f"[skip] 数据库已存在: {title} @ {r.date}")
+        return
+
+    # 只归档更早的旧复盘记录，避免把当天刚生成的记录归档掉
+    summary_ids = [pid for t, _, pid in rows_info if "股市复盘" in t and t != title]
     for pid in summary_ids:
         try:
             resp = requests.patch(
@@ -996,11 +1003,6 @@ def write_to_database(r: Report) -> None:
                 print(f"[ok] 已归档旧复盘记录 {pid}")
         except requests.RequestException as exc:
             print(f"[warn] 归档旧记录失败 {pid}: {exc}", file=sys.stderr)
-
-    title = f"{r.date} 股市复盘与自选股"
-    if (title, r.date) in existing_keys:
-        print(f"[skip] 数据库已存在: {title} @ {r.date}")
-        return
 
     children = build_children(r)
     first_batch = children[:90]
