@@ -13,6 +13,20 @@
 
 数据来源为东方财富公开接口，无需 API Key。
 
+## 同花顺数据源（可选）
+
+如已注册[同花顺官方金融数据服务](https://fuyao.aicubes.cn/)并创建 API Key，
+把它设为环境变量 `HITHINK_FINANCE_API_KEY` 后，脚本会自动切换数据源：
+
+- 大盘指数、自选股行情 → 同花顺行情快照
+- 涨停池 → 同花顺涨停池（带涨停原因、连板数）
+- 龙虎榜 → 同花顺龙虎榜（含机构/游资净额口径）
+- 热股榜 → 同花顺热股榜（新增板块）
+- 涨跌家数、板块涨跌、财经要闻 → 仍由东方财富补充
+
+未设置 Key 时自动回退到东方财富数据源，功能与之前一致。
+本地可用 `python3 src/collect.py --check-ths` 校验 Key。
+
 ## 需要的密钥
 
 在 GitHub 仓库 Settings → Secrets and variables → Actions 中添加：
@@ -21,6 +35,7 @@
 | --- | --- |
 | `NOTION_TOKEN` | Notion Integration Token（`secret_...`） |
 | `NOTION_DATABASE_ID`（可选） | Notion 日历数据库 ID；不填则写入与 hackathon-daily 共用的 2026 数据库 |
+| `HITHINK_FINANCE_API_KEY`（可选） | 同花顺官方数据 API Key；不填则使用东方财富数据源 |
 
 数据库需要包含 **名称**（title）和 **日期**（date）两个属性，并已分享给该 Notion Integration。
 

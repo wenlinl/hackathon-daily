@@ -7,7 +7,8 @@
     python collect.py --check-notion           # 只校验 Notion token/数据库
     python collect.py --watchlist 路径.json    # 指定自选股清单（默认 config/watchlist.json）
 
-数据来源：东方财富公开接口（行情/涨停跌停池/龙虎榜/板块/财经要闻），无需 API Key。
+数据来源：默认东方财富公开接口（无需 Key）；设置 HITHINK_FINANCE_API_KEY 后，
+指数/自选股/涨停池/龙虎榜/热股榜改用同花顺官方数据，其余仍由东方财富补充。
 """
 
 from __future__ import annotations
@@ -43,6 +44,10 @@ FALLBACK_DB_ID = "33660e0b0bbf806ab9e9effb9cebb712"
 
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
+
+# 同花顺官方金融数据服务（https://fuyao.aicubes.cn）
+THS_API_KEY = os.environ.get("HITHINK_FINANCE_API_KEY", "").strip()
+THS_BASE = "https://fuyao.aicubes.cn"
 
 QUOTE_API = "https://push2.eastmoney.com/api/qt"
 POOL_API = "https://push2ex.eastmoney.com"
@@ -80,6 +85,17 @@ REQUEST_GAP = 0.5  # 东方财富接口有频控，请求间最小间隔（秒�
 QUOTE_FIELDS = "f2,f3,f4,f5,f6,f12,f14,f15,f16,f17,f18"
 BREADTH_FIELDS = "f14,f113,f114,f115"
 WATCHLIST_PATH = ""
+SOURCE = "auto"
+
+# 指数 thscode（同花顺官方）：(.SH/.SZ/.BJ)
+THS_INDICES = [
+    ("000001.SH", "上证指数"),
+    ("399001.SZ", "深证成指"),
+    ("399006.SZ", "创业板指"),
+    ("000688.SH", "科创50"),
+    ("000300.SH", "沪深300"),
+    ("899050.BJ", "北证50"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +129,15 @@ class PoolItem:
     name: str
     pct: float | None = None
     industry: str = ""
+    reason: str = ""
+    days: str = ""
+
+
+@dataclass
+class HotStock:
+    code: str
+    name: str
+    heat: float = 0.0
 
 
 @dataclass
@@ -161,6 +186,8 @@ class Report:
     concept_up: list[Board] = field(default_factory=list)
     watchlist: list[WatchStock] = field(default_factory=list)
     news: list[NewsItem] = field(default_factory=list)
+    hot_stocks: list[HotStock] = field(default_factory=list)
+    source_label: str = "东方财富"
     warnings: list[str] = field(default_factory=list)
 
 
@@ -433,6 +460,173 @@ def fetch_news() -> list[NewsItem]:
     return items
 
 
+# ---------------------------------------------------------------------------
+# 同花顺官方数据（HITHINK_FINANCE_API_KEY）
+# ---------------------------------------------------------------------------
+
+def ths_get(path: str, params: dict | None = None) -> dict | None:
+    """同花顺官方 REST 请求：X-api-key 鉴权，code==0 才算成功。"""
+    if not THS_API_KEY:
+        return None
+    try:
+        resp = requests.get(
+            f"{THS_BASE}{path}",
+            params=params,
+            headers={**HEADERS, "X-api-key": THS_API_KEY},
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        if body.get("code") != 0:
+            return None
+        return body.get("data")
+    except Exception:
+        return None
+
+
+def _ths_code(code: str) -> str:
+    """A股代码 -> 同花顺 thscode（6/9 沪，4/8 北，其余深）。"""
+    if code.startswith(("6", "9")):
+        return f"{code}.SH"
+    if code.startswith(("4", "8")):
+        return f"{code}.BJ"
+    return f"{code}.SZ"
+
+
+def ths_fetch_indices() -> list[Quote]:
+    codes = ",".join(c for c, _ in THS_INDICES)
+    data = ths_get("/api/a-share-index/prices/snapshot", {"thscodes": codes})
+    if not data:
+        return []
+    name_map = {c.split(".")[0]: n for c, n in THS_INDICES}
+    items: list[Quote] = []
+    for d in data.get("item") or []:
+        ticker = str(d.get("ticker") or "")
+        if not ticker:
+            continue
+        items.append(
+            Quote(
+                code=ticker,
+                name=name_map.get(ticker, ticker),
+                price=d.get("last_price"),
+                pct=d.get("price_change_ratio_pct"),
+                change=d.get("price_change"),
+                amount=d.get("turnover"),
+                high=d.get("high_price"),
+                low=d.get("low_price"),
+                open_=d.get("open_price"),
+            )
+        )
+    return items
+
+
+def ths_fetch_watchlist_quotes(stocks: list[WatchStock]) -> list[WatchStock]:
+    if not stocks:
+        return stocks
+    codes = ",".join(_ths_code(s.code) for s in stocks)
+    data = ths_get("/api/a-share/prices/snapshot", {"thscodes": codes})
+    if not data:
+        return stocks
+    by_code: dict[str, Quote] = {}
+    for d in data.get("item") or []:
+        ticker = str(d.get("ticker") or "")
+        if not ticker:
+            continue
+        by_code[ticker] = Quote(
+            code=ticker,
+            name="",
+            price=d.get("last_price"),
+            pct=d.get("price_change_ratio_pct"),
+            change=d.get("price_change"),
+            amount=d.get("turnover"),
+            high=d.get("high_price"),
+            low=d.get("low_price"),
+            open_=d.get("open_price"),
+        )
+    for s in stocks:
+        q = by_code.get(s.code)
+        if q:
+            q.name = s.name or q.name
+            s.quote = q
+    return stocks
+
+
+def ths_fetch_zt() -> tuple[int, list[PoolItem], str]:
+    """同花顺涨停池：带涨停原因与连板数。返回 (总数, 前10, 交易日)。"""
+    data = ths_get(
+        "/api/a-share/special-data/limit-up-pool",
+        {"sort_field": "limit_up_time", "sort_dir": "asc", "size": 100},
+    )
+    if not data:
+        return 0, [], ""
+    total = int(((data.get("pagination") or {}).get("total")) or 0)
+    items = [
+        PoolItem(
+            code=str(d.get("ticker") or ""),
+            name=str(d.get("name") or ""),
+            pct=d.get("price_change_ratio_pct"),
+            reason=str(d.get("limit_up_reason") or ""),
+            days=str(d.get("continue_day_text") or ""),
+        )
+        for d in (data.get("item") or [])[:10]
+    ]
+    ts = data.get("timestamp")
+    date_str = ""
+    if ts:
+        date_str = datetime.fromtimestamp(int(ts) / 1000, TZ).strftime("%Y-%m-%d")
+    return total, items, date_str
+
+
+def ths_fetch_lhb() -> tuple[str, list[LHBItem]]:
+    data = ths_get("/api/a-share/special-data/dragon-tiger-list", {"board_type": "all"})
+    if not data:
+        return "", []
+    rows = sorted(
+        (data.get("stock_items") or []),
+        key=lambda x: (x.get("net_value") or 0),
+        reverse=True,
+    )[:10]
+    items = [
+        LHBItem(
+            code=str(x.get("ticker") or ""),
+            name=str(x.get("name") or ""),
+            explanation=str(x.get("limit_reason") or ""),
+            change_rate=x.get("change"),
+            net_amt=float(x.get("net_value") or 0),
+        )
+        for x in rows
+    ]
+    return str(data.get("trade_date") or ""), items
+
+
+def ths_fetch_hot() -> list[HotStock]:
+    data = ths_get("/api/a-share/special-data/hot-stock-list", {"period": "day"})
+    if not data:
+        return []
+    return [
+        HotStock(
+            code=str(d.get("ticker") or ""),
+            name=str(d.get("name") or ""),
+            heat=float(d.get("heat") or 0),
+        )
+        for d in (data.get("item") or [])[:5]
+    ]
+
+
+def check_ths() -> int:
+    if not THS_API_KEY:
+        print("[error] 缺少环境变量 HITHINK_FINANCE_API_KEY", file=sys.stderr)
+        return 2
+    data = ths_get("/api/meta/tickers/search", {"q": "600519", "limit": 1})
+    if not data:
+        print("[error] 同花顺 API 校验失败：Key 无效或接口不可达", file=sys.stderr)
+        return 1
+    names = [str(x.get("name") or "") for x in (data.get("item") or [])]
+    print(f"[ok] 同花顺 API 可用: {names}")
+    return 0
+
+
 def _secid(code: str) -> str:
     """A股代码 -> 东方财富 secid：6/9 开头为沪市，其余为深市/北交所。"""
     return ("1." if code.startswith(("6", "9")) else "0.") + code
@@ -513,7 +707,14 @@ def render_text(r: Report) -> str:
     for b in r.breadth:
         lines.append(f"- {b.label}：上涨 {b.up} / 下跌 {b.down} / 平盘 {b.flat}")
     if r.zt_items:
-        lines.append("- 涨停个股（部分）：" + "、".join(f"{x.name}{_fmt_pct(x.pct)}" for x in r.zt_items[:8]))
+        parts = []
+        for x in r.zt_items[:8]:
+            label = x.name if not x.days else f"{x.name}({x.days})"
+            parts.append(f"{label} {_fmt_pct(x.pct)}")
+        lines.append("- 涨停个股（部分）：" + "、".join(parts))
+    reasons = [f"{x.name}：{x.reason}" for x in r.zt_items if x.reason][:3]
+    if reasons:
+        lines.append("- 涨停原因（部分）：" + "；".join(reasons))
 
     lines.append("【行业板块】")
     lines.append("- 涨幅前五：" + "、".join(f"{b.name} {_fmt_pct(b.pct)}" for b in r.board_up))
@@ -530,6 +731,11 @@ def render_text(r: Report) -> str:
             )
     else:
         lines.append("- 暂无数据（盘后披露或当日非交易日）")
+
+    if r.hot_stocks:
+        lines.append("【热股榜】")
+        for i, h in enumerate(r.hot_stocks, 1):
+            lines.append(f"{i}. {h.name} {h.code} 热度 {h.heat:,.0f}")
 
     lines.append("【自选股】")
     if r.watchlist:
@@ -553,7 +759,7 @@ def render_text(r: Report) -> str:
         lines.append("- 新闻获取失败")
 
     lines.append("【数据说明】")
-    lines.append("- 数据来源：东方财富公开接口，仅供研究参考，不构成投资建议。")
+    lines.append(f"- 数据来源：{r.source_label}，仅供研究参考，不构成投资建议。")
     lines.append("- 龙虎榜为盘后披露；周末/节假日运行会取最近交易日数据。")
     for w in r.warnings:
         lines.append(f"- ⚠️ {w}")
@@ -631,7 +837,7 @@ def _link_block(label: str, text: str, url: str) -> dict:
 
 def build_children(r: Report) -> list[dict]:
     c: list[dict] = []
-    c.append(_text_block("paragraph", f"**{r.date} A股复盘与自选股**（数据来源：东方财富公开接口）"))
+    c.append(_text_block("paragraph", f"**{r.date} A股复盘与自选股**（数据来源：{r.source_label}）"))
 
     c.append(_text_block("heading_2", "一、大盘概况"))
     if r.indices:
@@ -649,7 +855,14 @@ def build_children(r: Report) -> list[dict]:
     for b in r.breadth:
         c.append(_labeled_block(b.label, f"上涨 {b.up} / 下跌 {b.down} / 平盘 {b.flat}"))
     if r.zt_items:
-        c.append(_labeled_block("涨停个股（部分）", "、".join(f"{x.name} {_fmt_pct(x.pct)}" for x in r.zt_items[:8])))
+        parts = []
+        for x in r.zt_items[:8]:
+            label = x.name if not x.days else f"{x.name}({x.days})"
+            parts.append(f"{label} {_fmt_pct(x.pct)}")
+        c.append(_labeled_block("涨停个股（部分）", "、".join(parts)))
+    reasons = [f"{x.name}：{x.reason}" for x in r.zt_items if x.reason][:3]
+    if reasons:
+        c.append(_labeled_block("涨停原因（部分）", "；".join(reasons)))
 
     c.append(_text_block("heading_2", "三、板块表现"))
     c.append(_labeled_block("行业涨幅前五", "、".join(f"{b.name} {_fmt_pct(b.pct)}" for b in r.board_up)))
@@ -668,7 +881,12 @@ def build_children(r: Report) -> list[dict]:
     else:
         c.append(_labeled_block("龙虎榜", "暂无数据（盘后披露或当日非交易日）"))
 
-    c.append(_text_block("heading_2", "五、自选股"))
+    if r.hot_stocks:
+        c.append(_text_block("heading_2", "五、热股榜"))
+        for h in r.hot_stocks[:5]:
+            c.append(_labeled_block(h.name, f"{h.code}，热度 {h.heat:,.0f}"))
+
+    c.append(_text_block("heading_2", "六、自选股"))
     if r.watchlist:
         for s in r.watchlist:
             q = s.quote
@@ -685,7 +903,7 @@ def build_children(r: Report) -> list[dict]:
     else:
         c.append(_labeled_block("自选股", "配置为空，请编辑 config/watchlist.json"))
 
-    c.append(_text_block("heading_2", "六、财经要闻"))
+    c.append(_text_block("heading_2", "七、财经要闻"))
     if r.news:
         for n in r.news[:10]:
             c.append(_link_block("📰", n.title, n.url))
@@ -693,7 +911,7 @@ def build_children(r: Report) -> list[dict]:
         c.append(_labeled_block("要闻", "获取失败"))
 
     c.append(_text_block("heading_2", "说明"))
-    c.append(_text_block("bulleted_list_item", "⚠️ 数据来自东方财富公开接口，仅供研究参考，不构成投资建议。"))
+    c.append(_text_block("bulleted_list_item", f"⚠️ 数据来自{r.source_label}，仅供研究参考，不构成投资建议。"))
     c.append(_text_block("bulleted_list_item", "💡 龙虎榜为盘后披露；周末/节假日运行会取最近交易日数据。"))
     for w in r.warnings:
         c.append(_text_block("bulleted_list_item", f"⚠️ {w}"))
@@ -825,30 +1043,64 @@ def check_notion() -> int:
 # ---------------------------------------------------------------------------
 
 def collect() -> Report:
+    global SOURCE
     today = datetime.now(TZ)
     date_str = today.strftime("%Y-%m-%d")
     date_compact = today.strftime("%Y%m%d")
     r = Report(date=date_str)
 
+    use_ths = (SOURCE == "ths") or (SOURCE == "auto" and bool(THS_API_KEY))
+    if use_ths:
+        r.source_label = "同花顺(官方) + 东方财富(补充)"
+        print("[info] 数据源：同花顺官方 + 东方财富补充")
+    else:
+        if SOURCE == "ths":
+            print("[warn] 未设置 HITHINK_FINANCE_API_KEY，回退到东方财富数据源", file=sys.stderr)
+        print("[info] 数据源：东方财富")
+
     print("[1/7] 拉取大盘指数…")
-    r.indices = fetch_indices()
+    if use_ths:
+        r.indices = ths_fetch_indices()
+    if not r.indices:
+        if use_ths:
+            print("[info] 同花顺指数获取失败，回退东方财富")
+        r.indices = fetch_indices()
     time.sleep(REQUEST_GAP)
 
     print("[2/7] 拉取涨跌家数…")
     r.breadth = fetch_breadth()
 
     print("[3/7] 拉取涨停/跌停/炸板池…")
-    r.zt_count, r.zt_items, zt_qdate = fetch_zt(date_compact)
+    if use_ths:
+        ths_zt = ths_fetch_zt()
+        if ths_zt[1]:
+            r.zt_count, r.zt_items, ths_date = ths_zt
+            if ths_date:
+                r.date = ths_date
+        else:
+            r.zt_count, r.zt_items, zt_qdate = fetch_zt(date_compact)
+            if zt_qdate:
+                r.date = f"{zt_qdate[:4]}-{zt_qdate[4:6]}-{zt_qdate[6:8]}"
+    else:
+        r.zt_count, r.zt_items, zt_qdate = fetch_zt(date_compact)
+        if zt_qdate:
+            r.date = f"{zt_qdate[:4]}-{zt_qdate[4:6]}-{zt_qdate[6:8]}"
     time.sleep(REQUEST_GAP)
     r.dt_count, r.dt_items = fetch_dt(date_compact)
     time.sleep(REQUEST_GAP)
     r.zb_count, _ = fetch_zb(date_compact)
 
-    if zt_qdate:
-        r.date = f"{zt_qdate[:4]}-{zt_qdate[4:6]}-{zt_qdate[6:8]}"
-
     print("[4/7] 拉取龙虎榜…")
-    r.lhb_date, r.lhb_items = fetch_lhb(r.date)
+    if use_ths:
+        r.lhb_date, r.lhb_items = ths_fetch_lhb()
+    if not r.lhb_items:
+        if use_ths:
+            print("[info] 同花顺龙虎榜获取失败，回退东方财富")
+        r.lhb_date, r.lhb_items = fetch_lhb(r.date)
+
+    print("[4.5/7] 拉取热股榜…")
+    if use_ths:
+        r.hot_stocks = ths_fetch_hot()
 
     print("[5/7] 拉取板块表现…")
     r.board_up, r.board_down, r.concept_up = fetch_boards()
@@ -858,7 +1110,12 @@ def collect() -> Report:
         os.path.dirname(os.path.abspath(__file__)), "..", "config", "watchlist.json"
     )
     stocks = load_watchlist(WATCHLIST_PATH or default_watchlist)
-    r.watchlist = fetch_watchlist_quotes(stocks)
+    if use_ths:
+        r.watchlist = ths_fetch_watchlist_quotes(stocks)
+    if not any(s.quote for s in r.watchlist):
+        if use_ths:
+            print("[info] 同花顺自选股获取失败，回退东方财富")
+        r.watchlist = fetch_watchlist_quotes(stocks)
 
     print("[7/7] 拉取财经要闻…")
     r.news = fetch_news()
@@ -871,16 +1128,22 @@ def collect() -> Report:
 
 
 def main() -> int:
-    global WATCHLIST_PATH
+    global SOURCE, WATCHLIST_PATH
     parser = argparse.ArgumentParser(description="A股每日复盘 + 自选股监控")
     parser.add_argument("--dry-run", action="store_true", help="只采集并打印，不写入 Notion")
     parser.add_argument("--check-notion", action="store_true", help="只校验 Notion token 与数据库")
+    parser.add_argument("--check-ths", action="store_true", help="只校验同花顺 API Key")
+    parser.add_argument("--source", choices=["auto", "ths", "em"], default="auto",
+                        help="数据源：auto(有 Key 自动用同花顺)/ths/em")
     parser.add_argument("--watchlist", default="", help="自选股清单 JSON 路径（默认 config/watchlist.json）")
     args = parser.parse_args()
 
     if args.check_notion:
         return check_notion()
+    if args.check_ths:
+        return check_ths()
 
+    SOURCE = args.source
     WATCHLIST_PATH = args.watchlist
     r = collect()
     print()
