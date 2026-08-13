@@ -12,11 +12,13 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import sys
 import time
+from html import escape as html_escape
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -40,6 +42,11 @@ DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（�
 
 # 服务器端历史信息库（本地 JSON 文件，随仓库持久化，替代 Notion 数据库）
 ARCHIVE_FILE = Path(__file__).resolve().parent.parent / "data" / "archive.json"
+# 信息库可浏览页面（GitHub Pages，/docs 目录），每条目带锚点供日报跳转
+ARCHIVE_PAGE_URL = os.environ.get(
+    "ARCHIVE_PAGE_URL", "https://wenlinl.github.io/hackathon-daily/archive.html"
+)
+ARCHIVE_HTML = Path(__file__).resolve().parent.parent / "docs" / "archive.html"
 
 # AI 清洗/审核（OpenAI 兼容接口，可指向 DeepSeek 等）
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
@@ -267,6 +274,7 @@ class Event:
             parts.append("📍 地点：待确认")
         parts.append(f"摘要：{self.snippet[:180] if self.snippet else '待确认'}")
         parts.append(f"🔗 链接：{self.url if self.url else '待确认'}")
+        parts.append(f"🗄️ 信息库：{_resolve_archive_url(self.title)}")
         if self.official_url and self.official_url != self.url:
             parts.append(f"✅ 官方链接：{self.official_url}")
         if self.review_status:
@@ -1696,6 +1704,7 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
     dup_idx = dup_idx or set()
     children: list[dict] = []
     dup_count = len(dup_idx)
+    archive_ids = _archive_id_map()
     review_counts: dict[str, int] = {}
     for ev in events:
         if ev.review_status:
@@ -1754,6 +1763,14 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
             children.append(_labeled_block("bulleted_list_item", "🔬 核对", verify_line))
         if ev.official_url and ev.official_url != ev.url:
             children.append(_link_block("bulleted_list_item", "✅ 官方链接", "查看详情", ev.official_url))
+        children.append(
+            _link_block(
+                "bulleted_list_item",
+                "🗄️ 信息库",
+                "打开对应记录",
+                _resolve_archive_url(ev.title, archive_ids),
+            )
+        )
         if ev.url:
             children.append(_link_block("bulleted_list_item", "🔗 链接", "查看详情", ev.url))
         else:
@@ -1835,6 +1852,137 @@ def _save_archive(data: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, ARCHIVE_FILE)
+
+
+def entry_id(title: str) -> str:
+    """信息库条目稳定锚点 ID：标题归一化后的哈希（保证一一对应且稳定）。"""
+    key = normalize_title(title)
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+
+
+def _archive_id_map() -> dict[str, str]:
+    """读取信息库，返回 {归一化标题: 锚点ID}。"""
+    entries = _load_archive().get("entries", {})
+    return {key: entry_id(e.get("title") or key) for key, e in entries.items()}
+
+
+def _resolve_archive_url(title: str, id_map: dict[str, str] | None = None) -> str:
+    """解析某活动在信息库页面中的锚点链接（精确匹配优先，其次包含匹配）。"""
+    if id_map is None:
+        id_map = _archive_id_map()
+    norm = normalize_title(title)
+    if norm in id_map:
+        return f"{ARCHIVE_PAGE_URL}#entry-{id_map[norm]}"
+    for key, eid in id_map.items():
+        if len(norm) >= 8 and len(key) >= 8 and (norm in key or key in norm):
+            return f"{ARCHIVE_PAGE_URL}#entry-{eid}"
+    return f"{ARCHIVE_PAGE_URL}#entry-{entry_id(title)}"
+
+
+def build_archive_html() -> None:
+    """根据服务器端信息库生成可浏览的 archive.html（每条目带锚点，供日报跳转）。"""
+    data = _load_archive()
+    entries = data.get("entries", {})
+    items = sorted(
+        (
+            {
+                "id": entry_id(e.get("title") or key),
+                "title": e.get("title") or key,
+                "entry": e,
+            }
+            for key, e in entries.items()
+        ),
+        key=lambda x: x["entry"].get("first_seen", ""),
+        reverse=True,
+    )
+    cards: list[str] = []
+    for it in items:
+        e = it["entry"]
+        fields: list[str] = []
+        for label, val in (
+            ("首次收录", e.get("first_seen")),
+            ("报名截止", e.get("deadline")),
+            ("竞赛时间", e.get("competition_time")),
+            ("地点", e.get("location")),
+            ("主办方", e.get("host")),
+            ("主题", e.get("themes")),
+            ("奖金", e.get("prize")),
+            ("报名条件", e.get("eligibility")),
+            ("形式", e.get("format")),
+            ("标签", e.get("tags")),
+            ("状态", e.get("status")),
+            ("来源", e.get("source")),
+            ("核对", e.get("review_status")),
+        ):
+            if val:
+                fields.append(f"<li><b>{html_escape(label)}</b>：{html_escape(str(val))}</li>")
+        links: list[str] = []
+        if e.get("official_url"):
+            links.append(f'<a href="{html_escape(e["official_url"])}" target="_blank" rel="noopener">官方链接</a>')
+        if e.get("url"):
+            links.append(f'<a href="{html_escape(e["url"])}" target="_blank" rel="noopener">来源链接</a>')
+        links_html = " · ".join(links) if links else '<span class="muted">无链接</span>'
+        summary = e.get("summary") or ""
+        cards.append(
+            '<section class="card" id="entry-%s">'
+            "<h2>%s</h2><p class=\"meta\">ID: entry-%s · %s</p>"
+            "<ul>%s</ul><p class=\"sum\">%s</p><p class=\"links\">%s</p></section>"
+            % (
+                it["id"],
+                html_escape(it["title"]),
+                it["id"],
+                html_escape(str(e.get("first_seen") or "")),
+                "".join(fields),
+                html_escape(summary)[:300],
+                links_html,
+            )
+        )
+    page = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>黑客松信息库</title>
+<style>
+body{{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;background:#f6f7f9;color:#1f2328}}
+header{{position:sticky;top:0;background:#fff;border-bottom:1px solid #e2e4e8;padding:16px 24px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}}
+h1{{font-size:18px;margin:0}}
+input{{flex:1;min-width:240px;padding:8px 12px;border:1px solid #d0d3d8;border-radius:8px;font-size:14px}}
+#count{{color:#656d76;font-size:13px;white-space:nowrap}}
+main{{max-width:960px;margin:24px auto;padding:0 16px}}
+.card{{background:#fff;border:1px solid #e2e4e8;border-radius:12px;padding:16px 20px;margin-bottom:16px}}
+.card h2{{margin:0 0 6px;font-size:16px}}
+.meta{{color:#656d76;font-size:12px;margin:0 0 8px}}
+.card ul{{margin:0 0 8px;padding-left:18px;font-size:14px;line-height:1.7}}
+.sum{{color:#57606a;font-size:13px;margin:0 0 8px}}
+.links a{{color:#0969da;text-decoration:none;margin-right:8px}}
+.links a:hover{{text-decoration:underline}}
+.muted{{color:#8b949e}}
+</style>
+</head>
+<body>
+<header><h1>黑客松信息库</h1><input id="q" type="search" placeholder="搜索活动名称/地点/主办方…"><span id="count">共 {len(cards)} 条</span></header>
+<main>
+{"".join(cards)}
+</main>
+<script>
+const q=document.getElementById('q');
+q.addEventListener('input',()=>{{
+  const k=q.value.trim().toLowerCase();
+  let n=0;
+  document.querySelectorAll('.card').forEach(c=>{{
+    const hit=!k||c.textContent.toLowerCase().includes(k);
+    c.style.display=hit?'':'none';
+    if(hit)n++;
+  }});
+  document.getElementById('count').textContent='显示 '+n+' / {len(cards)} 条';
+}});
+</script>
+</body>
+</html>"""
+    ARCHIVE_HTML.parent.mkdir(parents=True, exist_ok=True)
+    ARCHIVE_HTML.write_text(page, encoding="utf-8")
+    print(f"[info] 已生成信息库页面 {ARCHIVE_HTML}（{len(cards)} 条，含锚点）")
 
 
 def load_archive_titles() -> set[str]:
@@ -1995,10 +2143,14 @@ def main() -> int:
     parser.add_argument("--check-notion", action="store_true", help="只验证 Notion 连接与结构")
     parser.add_argument("--no-ai", action="store_true", help="跳过 AI 清洗/审核（仅规则清洗）")
     parser.add_argument("--no-verify", action="store_true", help="跳过 AI 重新检索核对")
+    parser.add_argument("--build-archive", action="store_true", help="只根据现有信息库重新生成 archive.html")
     args = parser.parse_args()
 
     if args.check_notion:
         return check_notion()
+    if args.build_archive:
+        build_archive_html()
+        return 0
 
     dry_run = args.dry_run or args.search_only
     if not dry_run:
@@ -2083,6 +2235,7 @@ def main() -> int:
         print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
     write_to_archive(date_str, unique[:MAX_EVENTS])
+    build_archive_html()
     write_to_calendar(date_str, unique[:MAX_EVENTS], dup_idx)
     print("[done] 全部完成")
     return 0
