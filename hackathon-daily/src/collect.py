@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import re
 import sys
@@ -29,6 +30,7 @@ from bs4 import BeautifulSoup
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
 NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
@@ -37,6 +39,8 @@ DB_ARCHIVE_ID = "3bb60e0b0bbf8179aa88d98a77a635ef"        # "黑客松信息库"
 
 # 只展示今天起未来 N 天内的活动
 LOOKAHEAD_DAYS = 30
+# 单日汇总最多展示/入库的活动条数
+MAX_EVENTS = 50
 
 # 常见城市/地点关键词（用于提取活动地点）
 CITY_HINTS = [
@@ -99,6 +103,28 @@ EXCLUDE_TITLE_HINTS = [
     "奖学金",
     "夏令营",
     "冬令营",
+    # 课程/教程/广告类（标题出现即排除，避免 Eventbrite 等平台混入课程广告）
+    "ux design",
+    "learn ",
+    "course",
+    "tutorial",
+    "masterclass",
+    "课程",
+    "教程",
+    # 往期回顾/资料/非活动类
+    "斩获",
+    "获奖",
+    "手册",
+    "文档",
+    "入门",
+    "weekly",
+    "活动推荐",
+    "大全",
+    "全收录",
+    "直播",
+    "video contest",
+    "暑期学校",
+    "冬季学校",
     # 回顾/科普/招聘类（非可报名活动）
     "回顾",
     "收官",
@@ -129,6 +155,7 @@ class Event:
     competition_time: str = ""
     calendar_date: str = ""  # 写入日历数据库用的日期（YYYY-MM-DD）
     raw: dict = field(default_factory=dict)
+    is_hackathon_site: bool = False  # 来源本身就是黑客松聚合站，跳过关键词过滤
 
     def as_markdown(self) -> str:
         parts = [f"### {self.title}"]
@@ -242,9 +269,608 @@ def search_sogou_weixin(query: str) -> list[Event]:
     return events
 
 
+def _fetch_json(url: str, timeout: int = 20, **kwargs) -> dict | list | None:
+    """抓取 JSON 接口，失败返回 None。"""
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=timeout, **kwargs)
+        if resp.status_code == 200:
+            return resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        print(f"[warn] JSON 抓取失败 {url}: {exc}", file=sys.stderr)
+    return None
+
+
+def _fmt_date_range(start_iso: str, end_iso: str) -> str:
+    """把 ISO 起止时间规范为 YYYY-MM-DD ~ YYYY-MM-DD。"""
+    start = (start_iso or "")[:10]
+    end = (end_iso or "")[:10]
+    if start and end:
+        return f"{start} ~ {end}"
+    return start or end
+
+
+def _next_data(html: str) -> dict | None:
+    """提取 Next.js 页面内嵌的 __NEXT_DATA__ JSON。"""
+    m = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        html,
+        re.S,
+    )
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except ValueError:
+        return None
+
+
+MONTHS_EN = {
+    "January": 1, "February": 2, "March": 3, "April": 4, "May": 5, "June": 6,
+    "July": 7, "August": 8, "September": 9, "October": 10, "November": 11,
+    "December": 12,
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+    "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
+
+def _en_dates_to_range(text: str) -> str:
+    """把英文日期（March 12, 2028 - March 27, 2028）转为 YYYY-MM-DD 区间。"""
+    dates: list[str] = []
+    for m in re.finditer(r"([A-Za-z]+)\.?\s+(\d{1,2}),\s+(\d{4})", text):
+        mon = MONTHS_EN.get(m.group(1).capitalize())
+        if not mon:
+            continue
+        try:
+            d = f"{int(m.group(3)):04d}-{mon:02d}-{int(m.group(2)):02d}"
+        except ValueError:
+            continue
+        if d not in dates:
+            dates.append(d)
+    if len(dates) >= 2:
+        return f"{dates[0]} ~ {dates[-1]}"
+    return dates[0] if dates else ""
+
+
+def search_mlh() -> list[Event]:
+    """MLH（Major League Hacking）赛季活动：Inertia 内嵌 JSON。"""
+    events: list[Event] = []
+    html = _fetch("https://mlh.io/events", timeout=25)
+    if not html:
+        return events
+    m = re.search(r'<script data-page="app" type="application/json">(.*?)</script>', html, re.S)
+    if not m:
+        return events
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return events
+    for ev in data.get("props", {}).get("upcomingEvents") or []:
+        title = (ev.get("name") or "").strip()
+        if not title:
+            continue
+        rel = ev.get("url") or ""
+        url = urljoin("https://mlh.io", rel) if rel else ""
+        starts = (ev.get("startsAt") or "")[:10]
+        ends = (ev.get("endsAt") or "")[:10]
+        loc = (ev.get("location") or "").strip()
+        if not loc:
+            loc = "线上" if ev.get("formatType") == "virtual" else "待确认"
+        time_range = _fmt_date_range(starts, ends)
+        snippet = f"活动时间：{time_range}。地点：{loc}。"
+        events.append(
+            Event(
+                title=title,
+                url=url,
+                source="MLH",
+                snippet=snippet,
+                location=loc,
+                competition_time=time_range,
+                is_hackathon_site=True,
+            )
+        )
+    return events
+
+
+def search_devfolio() -> list[Event]:
+    """Devfolio 黑客松聚合站：__NEXT_DATA__ 内嵌 JSON。"""
+    events: list[Event] = []
+    html = _fetch("https://devfolio.co/hackathons", timeout=25)
+    if not html:
+        return events
+    data = _next_data(html)
+    if not data:
+        return events
+    try:
+        queries = data["props"]["pageProps"]["dehydratedState"]["queries"]
+        payload = queries[0]["state"]["data"]
+    except (KeyError, IndexError, TypeError):
+        return events
+    for group in ("open_hackathons", "upcoming_hackathons", "featured_hackathons"):
+        for ev in payload.get(group) or []:
+            title = (ev.get("name") or "").strip()
+            slug = ev.get("slug") or ""
+            if not title or not slug:
+                continue
+            url = f"https://devfolio.co/hackathons/{slug}"
+            time_range = _fmt_date_range(ev.get("starts_at", ""), ev.get("ends_at", ""))
+            loc = "线上" if ev.get("is_online") else "待确认"
+            snippet = f"活动时间：{time_range}。地点：{loc}。"
+            events.append(
+                Event(
+                    title=title,
+                    url=url,
+                    source="Devfolio",
+                    snippet=snippet,
+                    location=loc,
+                    competition_time=time_range,
+                    is_hackathon_site=True,
+                )
+            )
+    return events
+
+
+def search_allhackathons() -> list[Event]:
+    """All Hackathons 聚合站：静态 HTML 卡片（仅保留有明确日期的活动）。"""
+    events: list[Event] = []
+    html = _fetch("https://allhackathons.com/hackathons/", timeout=25)
+    if not html:
+        return events
+    soup = BeautifulSoup(html, "lxml")
+    for card in soup.select(".row.align-items-center.bg-white"):
+        a = card.select_one("a.h5")
+        if not a:
+            continue
+        title = a.get_text(" ", strip=True)
+        url = urljoin("https://allhackathons.com", a.get("href", ""))
+        badge = card.select_one("span.badge")
+        mode = badge.get_text(" ", strip=True) if badge else ""
+        date_el = a.find_next("p")
+        date_txt = date_el.get_text(" ", strip=True) if date_el else ""
+        time_range = _en_dates_to_range(date_txt)
+        if not time_range:
+            continue  # “Date TBD”类无日期活动不进入汇总，避免噪音
+        desc_el = card.select_one("p.text-muted.mt-2.mb-0")
+        desc = desc_el.get_text(" ", strip=True) if desc_el else ""
+        loc = "线上" if "online" in mode.lower() else ("线下" if "in-person" in mode.lower() else "")
+        snippet = "。".join(
+            x
+            for x in (
+                f"活动时间：{time_range}",
+                f"地点：{mode}",
+                desc,
+            )
+            if x
+        )
+        events.append(
+            Event(
+                title=title,
+                url=url,
+                source="AllHackathons",
+                snippet=snippet,
+                location=loc,
+                competition_time=time_range,
+                is_hackathon_site=True,
+            )
+        )
+    return events
+
+
+def search_ethglobal() -> list[Event]:
+    """ETHGlobal：静态 HTML 活动卡片（仅保留黑客松主活动，排除分会场/聚会）。"""
+    events: list[Event] = []
+    html = _fetch("https://ethglobal.com/events", timeout=25)
+    if not html:
+        return events
+    soup = BeautifulSoup(html, "lxml")
+    seen: set[str] = set()
+    for a in soup.select('a[href^="/events/"]'):
+        h2 = a.select_one("h2")
+        if not h2:
+            continue
+        title = h2.get_text(" ", strip=True)
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        url = urljoin("https://ethglobal.com", a.get("href", ""))
+        slug = (a.get("href") or "").lower()
+        if re.search(r"pragma|cowork|happy[- ]hour|meetup|conference|ethconf|party|dinner", slug):
+            continue
+        date_el = a.select_one("div.text-center")
+        date_txt = date_el.get_text(" ", strip=True) if date_el else ""
+        m = re.search(r"([A-Za-z]+)\s+(\d{1,2})(?:\s*[—–-]\s*(\d{1,2}))?", date_txt)
+        time_str = ""
+        if m:
+            mon = MONTHS_EN.get(m.group(1).capitalize())
+            if mon:
+                time_str = f"{mon}月{int(m.group(2))}日"
+                if m.group(3):
+                    time_str += f"—{int(m.group(3))}日"
+        tags = [
+            s.get_text(" ", strip=True)
+            for s in a.select("span")
+            if s.get_text(" ", strip=True)
+        ]
+        loc = ""
+        for t in tags:
+            tl = t.lower()
+            if tl in ("online", "virtual") or "async" in tl:
+                loc = "线上"
+            elif t in CITY_HINTS:
+                loc = t
+            if loc:
+                break
+        snippet = f"活动时间：{time_str or '待确认'}。地点：{loc or '待确认'}。"
+        if tags:
+            snippet += f"标签：{'/'.join(tags[:5])}。"
+        events.append(
+            Event(
+                title=title,
+                url=url,
+                source="ETHGlobal",
+                snippet=snippet,
+                location=loc,
+                is_hackathon_site=True,
+            )
+        )
+    return events
+
+
+def search_hackathoncom() -> list[Event]:
+    """Hackathon.com 首页推荐黑客松：静态 HTML 卡片。"""
+    events: list[Event] = []
+    html = _fetch("https://www.hackathon.com/", timeout=30)
+    if not html:
+        return events
+    soup = BeautifulSoup(html, "lxml")
+    for hero in soup.select(".hero"):
+        a = hero.select_one("a.hero__title")
+        if not a:
+            continue
+        title = a.get_text(" ", strip=True)
+        url = urljoin("https://www.hackathon.com", a.get("href", ""))
+        starts = ends = ""
+        for dblock in hero.select("div.date"):
+            title_el = dblock.select_one(".date__title")
+            day_el = dblock.select_one(".date__day")
+            mon_el = dblock.select_one(".date__month")
+            if not (title_el and day_el and mon_el):
+                continue
+            label = title_el.get_text(" ", strip=True).lower()
+            mon = MONTHS_EN.get(mon_el.get_text(" ", strip=True).capitalize())
+            if not mon:
+                continue
+            day = day_el.get_text(" ", strip=True)
+            try:
+                val = f"{mon}月{int(day)}日"
+            except ValueError:
+                continue
+            if label.startswith("start"):
+                starts = val
+            elif label.startswith("end"):
+                ends = val
+        time_str = f"{starts}—{ends}" if starts and ends else (starts or ends)
+        loc_el = hero.select_one(".hero__key-info__location")
+        loc = loc_el.get_text(" ", strip=True) if loc_el else ""
+        if loc.lower() in ("online", "virtual"):
+            loc = "线上"
+        snippet = f"活动时间：{time_str or '待确认'}。地点：{loc or '待确认'}。"
+        events.append(
+            Event(
+                title=title,
+                url=url,
+                source="Hackathon.com",
+                snippet=snippet,
+                location=loc,
+                is_hackathon_site=True,
+            )
+        )
+    return events
+
+
+def search_hackclub() -> list[Event]:
+    """Hack Club 高中生黑客松策展列表：__NEXT_DATA__ 内嵌 JSON。"""
+    events: list[Event] = []
+    html = _fetch("https://hackathons.hackclub.com/", timeout=25)
+    if not html:
+        return events
+    data = _next_data(html)
+    if not data:
+        return events
+    try:
+        ev_list = data["props"]["pageProps"]["events"]
+    except (KeyError, TypeError):
+        return events
+    for ev in ev_list or []:
+        title = (ev.get("name") or "").strip()
+        url = ev.get("website") or ""
+        if not title:
+            continue
+        time_range = _fmt_date_range(ev.get("start", ""), ev.get("end", ""))
+        if ev.get("virtual"):
+            loc = "线上"
+        else:
+            loc = "、".join(
+                str(x) for x in (ev.get("city"), ev.get("state"), ev.get("country")) if x
+            ) or "待确认"
+        snippet = f"活动时间：{time_range}。地点：{loc}。Hack Club 策展的高中生黑客松。"
+        events.append(
+            Event(
+                title=title,
+                url=url,
+                source="Hack Club",
+                snippet=snippet,
+                location=loc,
+                competition_time=time_range,
+                is_hackathon_site=True,
+            )
+        )
+    return events
+
+
+def search_eventbrite() -> list[Event]:
+    """Eventbrite 黑客松搜索页：JSON-LD 结构化数据。"""
+    events: list[Event] = []
+    html = _fetch("https://www.eventbrite.com/d/online/hackathon/", timeout=25)
+    if not html:
+        return events
+    soup = BeautifulSoup(html, "lxml")
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(script.string or script.get_text())
+        except ValueError:
+            continue
+        if not isinstance(data, dict) or data.get("@type") != "ItemList":
+            continue
+        for item in data.get("itemListElement") or []:
+            ev = item.get("item") or {}
+            title = (ev.get("name") or "").strip()
+            if not title:
+                continue
+            time_range = _fmt_date_range(ev.get("startDate", ""), ev.get("endDate", ""))
+            mode = ev.get("eventAttendanceMode") or ""
+            loc = "线上" if "OnlineEventAttendanceMode" in mode else "待确认"
+            desc = (ev.get("description") or "").strip()
+            snippet = f"活动时间：{time_range}。地点：{loc}。"
+            if desc:
+                snippet += f"{desc[:200]}"
+            events.append(
+                Event(
+                    title=title,
+                    url=ev.get("url") or "",
+                    source="Eventbrite",
+                    snippet=snippet,
+                    location=loc,
+                    competition_time=time_range,
+                )
+            )
+    return events
+
+
+def search_segmentfault() -> list[Event]:
+    """SegmentFault 思否活动：__NEXT_DATA__ 内嵌活动列表（含报名/活动时间戳）。"""
+    events: list[Event] = []
+    html = _fetch("https://segmentfault.com/events", timeout=25)
+    if not html:
+        return events
+    data = _next_data(html)
+    if not data:
+        return events
+    try:
+        activity = data["props"]["pageProps"]["initialState"]["activity"]
+        ev_list = activity.get("newestList") or []
+    except (KeyError, TypeError):
+        return events
+    tz = timezone(timedelta(hours=8))
+    for it in ev_list:
+        title = (it.get("name") or "").strip()
+        if not title:
+            continue
+        url = urljoin("https://segmentfault.com", it.get("url") or "")
+        sign_url = it.get("real_sign_url") or ""
+        if sign_url:
+            url = sign_url
+
+        def ts_date(key: str) -> str:
+            ts = it.get(key)
+            if not ts:
+                return ""
+            try:
+                return datetime.fromtimestamp(int(ts), tz=tz).strftime("%Y-%m-%d")
+            except (ValueError, OSError):
+                return ""
+
+        sign_start = ts_date("sign_start")
+        sign_end = ts_date("sign_end")
+        start = ts_date("start")
+        end = ts_date("end")
+        city = (it.get("city_name") or "").strip()
+        cat = (it.get("category_name") or "").strip()
+        loc = city or ("线上" if "线上" in cat else "待确认")
+        snippet = (
+            f"报名时间：{sign_start or '待确认'} ~ {sign_end or '待确认'}。"
+            f"活动时间：{start or '待确认'} ~ {end or '待确认'}。地点：{loc}。"
+        )
+        events.append(
+            Event(
+                title=title,
+                url=url,
+                source="SegmentFault",
+                snippet=snippet,
+                location=loc,
+                signup_start=sign_start,
+                signup_deadline=sign_end,
+                competition_time=f"{start} ~ {end}" if start and end else "",
+            )
+        )
+    return events
+
+
+def search_datafountain() -> list[Event]:
+    """DataFountain 数据竞赛平台：公开 API。"""
+    events: list[Event] = []
+    url = (
+        "https://www.datafountain.cn/api/competitions"
+        "?competitionTypeId=all&stateId=all&pageSize=30&page=1"
+    )
+    data = _fetch_json(url)
+    if not data:
+        return events
+    try:
+        competitions = data["cmpt"]["competitions"]
+    except (KeyError, TypeError):
+        return events
+    for c in competitions or []:
+        title = (c.get("title") or "").strip()
+        if not title:
+            continue
+        cid = c.get("id")
+        url_c = f"https://www.datafountain.cn/competitions/{cid}" if cid else ""
+        time_range = _fmt_date_range(c.get("startTime", ""), c.get("endTime", ""))
+        reward = (c.get("reward") or "").strip()
+        orgs = [
+            (o.get("name") or "").strip()
+            for o in (c.get("organizers") or [])
+            if (o.get("name") or "").strip()
+        ][:2]
+        snippet = f"赛事时间：{time_range}。奖励：{reward or '待确认'}。主办：{'、'.join(orgs) or '待确认'}。"
+        events.append(
+            Event(
+                title=title,
+                url=url_c,
+                source="DataFountain",
+                snippet=snippet,
+                competition_time=time_range,
+            )
+        )
+    return events
+
+
+def search_lanqiao() -> list[Event]:
+    """蓝桥杯竞赛：公开 API（分页取前两页）。"""
+    events: list[Event] = []
+    for page in (1, 2):
+        data = _fetch_json(f"https://www.lanqiao.cn/api/v2/contests/?page={page}")
+        if not data:
+            continue
+        for r in (data.get("results") or []):
+            title = (r.get("name") or "").strip()
+            if not title:
+                continue
+            url = urljoin("https://www.lanqiao.cn", r.get("html_url") or "")
+            time_range = _fmt_date_range(r.get("open_at", ""), r.get("end_at", ""))
+            subject = (r.get("subject") or "").strip()
+            desc = (r.get("description") or "").strip()
+            snippet = f"活动时间：{time_range}。科目：{subject or '待确认'}。{desc}"
+            events.append(
+                Event(
+                    title=title,
+                    url=url,
+                    source="蓝桥杯",
+                    snippet=snippet,
+                    competition_time=time_range,
+                )
+            )
+    return events
+
+
+def search_devevent() -> list[Event]:
+    """Dev-Event（GitHub 聚合，韩国开发者活动为主）：README Markdown。"""
+    events: list[Event] = []
+    text = None
+    raw_url = "https://raw.githubusercontent.com/brave-people/Dev-Event/master/README.md"
+    resp = None
+    try:
+        resp = requests.get(raw_url, headers=HEADERS, timeout=20)
+        if resp.status_code == 200:
+            text = resp.text
+    except requests.RequestException as exc:
+        print(f"[warn] Dev-Event raw 抓取失败: {exc}", file=sys.stderr)
+    if text is None:
+        api_headers = dict(HEADERS)
+        api_headers["Accept"] = "application/vnd.github.raw"
+        token = os.environ.get("GITHUB_TOKEN", "")
+        if token:
+            api_headers["Authorization"] = f"Bearer {token}"
+        try:
+            resp = requests.get(
+                "https://api.github.com/repos/brave-people/Dev-Event/contents/README.md",
+                headers=api_headers,
+                timeout=25,
+            )
+            if resp.status_code == 200:
+                text = resp.text
+        except requests.RequestException as exc:
+            print(f"[warn] Dev-Event api 抓取失败: {exc}", file=sys.stderr)
+    if not text:
+        return events
+
+    entry_re = re.compile(r"-\s+__\[([^\]]+)\]\(([^)]+)\)__\s*$")
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = entry_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        title = m.group(1).strip()
+        url = m.group(2).strip()
+        i += 1
+        details: list[str] = []
+        while i < len(lines) and lines[i].strip() and not entry_re.match(lines[i]):
+            details.append(lines[i].strip())
+            i += 1
+        block = " ".join(details)
+        dm = re.search(r"(?:접수|일시):\s*(.+)", block)
+        date_seg = dm.group(1) if dm else ""
+        # 韩文日期形如“07. 10(금) ~ 08. 10(월)”→ 规范为“7月10日 ~ 8月10日”
+        norm = re.sub(
+            r"(\d{1,2})\.\s*(\d{1,2})",
+            lambda mm: f"{int(mm.group(1))}月{int(mm.group(2))}日",
+            date_seg,
+        )
+        norm = re.sub(r"\([가-힣]+\)", "", norm)  # 去掉韩文星期后缀
+        snippet = f"报名/活动时间：{norm or '待确认'}。"
+        events.append(
+            Event(
+                title=title,
+                url=url,
+                source="Dev-Event(GitHub聚合)",
+                snippet=snippet,
+            )
+        )
+    return events
+
+
 def search_all() -> list[Event]:
     seen: set[str] = set()
     results: list[Event] = []
+    # 优先跑结构化站点（聚合站信息更准），再跑关键词搜索
+    for fn in (
+        search_mlh,
+        search_devfolio,
+        search_allhackathons,
+        search_ethglobal,
+        search_hackathoncom,
+        search_hackclub,
+        search_eventbrite,
+        search_segmentfault,
+        search_datafountain,
+        search_lanqiao,
+        search_devevent,
+    ):
+        try:
+            found = fn()
+        except Exception as exc:  # noqa: BLE001 - 单个源失败不影响整体
+            print(f"[warn] {fn.__name__} 失败: {exc}", file=sys.stderr)
+            continue
+        for ev in found:
+            key = normalize_title(ev.title)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            results.append(ev)
+        time.sleep(0.5)
+
     for query in QUERIES:
         for fn in (search_bing, search_duckduckgo, search_sogou_weixin):
             try:
@@ -253,7 +879,7 @@ def search_all() -> list[Event]:
                 print(f"[warn] {fn.__name__} 失败: {exc}", file=sys.stderr)
                 continue
             for ev in found:
-                key = (ev.title or "").strip().lower()
+                key = normalize_title(ev.title)
                 if not key or key in seen:
                     continue
                 seen.add(key)
@@ -266,9 +892,14 @@ def is_relevant(ev: Event) -> bool:
     """关键词过滤：标题或摘要必须包含黑客松相关词，并排除明显无关内容。"""
     text = (ev.title or "") + " " + (ev.snippet or "")
     lower = text.lower()
-    if not any(k.lower() in lower for k in RELEVANT_KEYWORDS):
+    # 专做黑客松的聚合站（MLH/Devfolio/ETHGlobal 等）不再要求标题含关键词
+    if not ev.is_hackathon_site and not any(k.lower() in lower for k in RELEVANT_KEYWORDS):
         return False
     if any(h in (ev.title or "").lower() for h in EXCLUDE_TITLE_HINTS):
+        return False
+    # 标题带往年年份（如 2021 年）的文章基本是往期内容，直接排除
+    m_year = re.search(r"(20\d{2})", ev.title or "")
+    if m_year and int(m_year.group(1)) < datetime.now(BEIJING_TZ).date().year:
         return False
     return True
 
@@ -301,10 +932,11 @@ def extract_fields(ev: Event, today: dt.date) -> None:
     year = today.year
     window_end = today + dt.timedelta(days=LOOKAHEAD_DAYS)
 
-    # 地点：优先“地点：xx”或“在XX举办/举行”，否则匹配常见城市
-    loc_match = re.search(r"(?:地点|地址|城市)\s*[:：]\s*([^，。;；、]{2,12})", text)
-    if loc_match:
-        ev.location = loc_match.group(1).strip()
+    if not ev.location:
+        # 地点：优先“地点：xx”或“在XX举办/举行”，否则匹配常见城市
+        loc_match = re.search(r"(?:地点|地址|城市)\s*[:：]\s*([^，。;；、]{2,12})", text)
+        if loc_match:
+            ev.location = loc_match.group(1).strip()
     if not ev.location:
         for city in CITY_HINTS:
             if city in text:
@@ -743,7 +1375,7 @@ def main() -> int:
     unique: list[Event] = []
     seen: set[str] = set()
     for ev in events:
-        key = ev.title.strip().lower()
+        key = normalize_title(ev.title)
         if key and key not in seen:
             seen.add(key)
             unique.append(ev)
@@ -754,7 +1386,7 @@ def main() -> int:
         extract_fields(ev, today)
 
     print(f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内）")
-    for ev in unique[:30]:
+    for ev in unique[:MAX_EVENTS]:
         print(
             f"  - {ev.title} | {ev.location or '地点待确认'} | "
             f"{ev.signup_deadline or '截止待确认'} | 日历:{ev.calendar_date}"
@@ -762,7 +1394,7 @@ def main() -> int:
 
     # 查重：与黑客松信息库中的历史条目比对
     archive_titles = load_archive_titles()
-    dup_idx = find_duplicates(unique[:30], archive_titles)
+    dup_idx = find_duplicates(unique[:MAX_EVENTS], archive_titles)
     print(f"[info] 查重完成：{len(dup_idx)} 条与历史重合")
     for i in sorted(dup_idx):
         print(f"  ⚠️ 重合: {unique[i].title[:50]}")
@@ -770,18 +1402,17 @@ def main() -> int:
     if dry_run:
         print("\n[dry-run] 以下为将写入 Notion 的汇总：")
         print(f"# {date_str} 黑客松活动汇总")
-        for i, ev in enumerate(unique[:30]):
+        for i, ev in enumerate(unique[:MAX_EVENTS]):
             tag = " ⚠️已收录" if i in dup_idx else ""
             print(ev.as_markdown().replace(f"### {ev.title}", f"### {ev.title}{tag}"))
-            print(ev.as_markdown())
             print(f"  日历日期：{ev.calendar_date}")
         return 0
 
     if not unique:
         print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
-    write_to_archive(date_str, unique[:30])
-    write_to_calendar(date_str, unique[:30], dup_idx)
+    write_to_archive(date_str, unique[:MAX_EVENTS])
+    write_to_calendar(date_str, unique[:MAX_EVENTS], dup_idx)
     print("[done] 全部完成")
     return 0
 
