@@ -63,6 +63,13 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 - 文件：`data/archive.json`（随仓库持久化，替代 Notion 数据库）
 - 用途：累积存储所有收录过的黑客松活动（按归一化标题去重），作为每日查重基准
 - 每次云端运行结束后，工作流会自动把更新后的 `archive.json` 提交回仓库
+- 可浏览页面：`docs/archive.html`（GitHub Pages 发布：<https://wenlinl.github.io/hackathon-daily/archive.html>），每条记录带锚点 `#entry-<id>`，支持搜索过滤
+
+## 日报 ↔ 信息库一一对应
+
+- 每条信息库记录有稳定锚点 ID：`sha1(归一化标题)[:12]`
+- 日报中每条活动都带 **"🗄️ 信息库 → 打开对应记录"** 链接，点击直接跳到信息库页面中该活动的锚点记录
+- 页面由 GitHub Actions 的 `deploy-pages` job 自动发布，每次运行后自动更新
 
 ## 本地试跑
 
