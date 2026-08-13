@@ -18,6 +18,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from urllib.parse import quote_plus, urljoin
 
 import requests
@@ -35,7 +36,19 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
 DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（日历视图所在）
-DB_ARCHIVE_ID = "3bb60e0b0bbf8179aa88d98a77a635ef"        # "黑客松信息库"（历史查重）
+
+# 服务器端历史信息库（本地 JSON 文件，随仓库持久化，替代 Notion 数据库）
+ARCHIVE_FILE = Path(__file__).resolve().parent.parent / "data" / "archive.json"
+
+# AI 清洗/审核（OpenAI 兼容接口，可指向 DeepSeek 等）
+LLM_API_KEY = os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+_DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+if not LLM_API_KEY and _DEEPSEEK_KEY:
+    LLM_API_KEY = _DEEPSEEK_KEY
+    LLM_BASE_URL = "https://api.deepseek.com/v1"
+    LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-chat")
 
 # 只展示今天起未来 N 天内的活动
 LOOKAHEAD_DAYS = 30
@@ -156,15 +169,46 @@ class Event:
     calendar_date: str = ""  # 写入日历数据库用的日期（YYYY-MM-DD）
     raw: dict = field(default_factory=dict)
     is_hackathon_site: bool = False  # 来源本身就是黑客松聚合站，跳过关键词过滤
+    # 扩充字段（覆盖更多黑客松信息）
+    host: str = ""           # 主办方
+    themes: str = ""         # 主题/赛道
+    prize: str = ""          # 奖金/奖池
+    eligibility: str = ""    # 报名条件/参赛对象
+    status: str = ""         # 活动状态（报名中/未开始/进行中/已结束）
+    format: str = ""         # 形式（线上/线下/混合）
+    tags: str = ""           # 标签
+    review_status: str = ""  # AI 审核状态
+    review_note: str = ""    # 审核说明
 
     def as_markdown(self) -> str:
         parts = [f"### {self.title}"]
-        parts.append(f"📝 报名时间：{self.signup_start or '待确认'}")
-        parts.append(f"⏳ 报名截止：{self.signup_deadline or '待确认'}")
-        parts.append(f"⏰ 竞赛时间：{self.competition_time or '待确认'}")
-        parts.append(f"📍 地点：{self.location or '待确认'}")
+        for label, val in (
+            ("🏢 主办方", self.host),
+            ("📌 主题", self.themes),
+            ("🏆 奖金", self.prize),
+            ("👥 报名条件", self.eligibility),
+            ("📝 报名时间", self.signup_start),
+            ("⏳ 报名截止", self.signup_deadline),
+            ("⏰ 竞赛时间", self.competition_time),
+            ("📍 地点", self.location),
+            ("🌐 形式", self.format),
+            ("🏷️ 标签", self.tags),
+            ("🚦 状态", self.status),
+        ):
+            if val:
+                parts.append(f"{label}：{val}")
+        if not self.signup_start:
+            parts.append("📝 报名时间：待确认")
+        if not self.signup_deadline:
+            parts.append("⏳ 报名截止：待确认")
+        if not self.competition_time:
+            parts.append("⏰ 竞赛时间：待确认")
+        if not self.location:
+            parts.append("📍 地点：待确认")
         parts.append(f"摘要：{self.snippet[:180] if self.snippet else '待确认'}")
         parts.append(f"🔗 链接：{self.url if self.url else '待确认'}")
+        if self.review_status:
+            parts.append(f"🔎 审核：{self.review_status}")
         return "\n".join(parts)
 
 
@@ -355,6 +399,10 @@ def search_mlh() -> list[Event]:
         loc = (ev.get("location") or "").strip()
         if not loc:
             loc = "线上" if ev.get("formatType") == "virtual" else "待确认"
+        fmt_map = {"virtual": "线上", "physical": "线下", "hybrid": "混合"}
+        fmt = fmt_map.get(ev.get("formatType") or "", "")
+        status_map = {"pending": "未开始", "in_progress": "进行中", "ended": "已结束"}
+        status = status_map.get(ev.get("status") or "", "")
         time_range = _fmt_date_range(starts, ends)
         snippet = f"活动时间：{time_range}。地点：{loc}。"
         events.append(
@@ -365,6 +413,8 @@ def search_mlh() -> list[Event]:
                 snippet=snippet,
                 location=loc,
                 competition_time=time_range,
+                format=fmt,
+                status=status,
                 is_hackathon_site=True,
             )
         )
@@ -394,6 +444,13 @@ def search_devfolio() -> list[Event]:
             url = f"https://devfolio.co/hackathons/{slug}"
             time_range = _fmt_date_range(ev.get("starts_at", ""), ev.get("ends_at", ""))
             loc = "线上" if ev.get("is_online") else "待确认"
+            fmt = "线上" if ev.get("is_online") else "线下"
+            status = {"open_hackathons": "报名中", "upcoming_hackathons": "未开始", "featured_hackathons": "报名中"}.get(group, "")
+            themes = "、".join(
+                (t.get("theme") or {}).get("name", "")
+                for t in (ev.get("themes") or [])
+                if (t.get("theme") or {}).get("name")
+            )
             snippet = f"活动时间：{time_range}。地点：{loc}。"
             events.append(
                 Event(
@@ -403,6 +460,9 @@ def search_devfolio() -> list[Event]:
                     snippet=snippet,
                     location=loc,
                     competition_time=time_range,
+                    format=fmt,
+                    status=status,
+                    themes=themes,
                     is_hackathon_site=True,
                 )
             )
@@ -432,6 +492,12 @@ def search_allhackathons() -> list[Event]:
         desc_el = card.select_one("p.text-muted.mt-2.mb-0")
         desc = desc_el.get_text(" ", strip=True) if desc_el else ""
         loc = "线上" if "online" in mode.lower() else ("线下" if "in-person" in mode.lower() else "")
+        fmt = loc or ""
+        tags = "、".join(
+            a.get_text(" ", strip=True)
+            for a in card.select('a[href^="/themes/"]')
+            if a.get_text(" ", strip=True)
+        )
         snippet = "。".join(
             x
             for x in (
@@ -449,6 +515,8 @@ def search_allhackathons() -> list[Event]:
                 snippet=snippet,
                 location=loc,
                 competition_time=time_range,
+                format=fmt,
+                tags=tags,
                 is_hackathon_site=True,
             )
         )
@@ -499,6 +567,7 @@ def search_ethglobal() -> list[Event]:
                 loc = t
             if loc:
                 break
+        fmt = loc or ""
         snippet = f"活动时间：{time_str or '待确认'}。地点：{loc or '待确认'}。"
         if tags:
             snippet += f"标签：{'/'.join(tags[:5])}。"
@@ -509,6 +578,8 @@ def search_ethglobal() -> list[Event]:
                 source="ETHGlobal",
                 snippet=snippet,
                 location=loc,
+                format=fmt,
+                themes="、".join(tags[:5]),
                 is_hackathon_site=True,
             )
         )
@@ -553,7 +624,15 @@ def search_hackathoncom() -> list[Event]:
         loc = loc_el.get_text(" ", strip=True) if loc_el else ""
         if loc.lower() in ("online", "virtual"):
             loc = "线上"
+        fmt = loc or ""
+        topic_tags = [
+            t.get_text(" ", strip=True)
+            for t in hero.select(".ht-event-topics__tag")
+            if t.get_text(" ", strip=True)
+        ]
         snippet = f"活动时间：{time_str or '待确认'}。地点：{loc or '待确认'}。"
+        if topic_tags:
+            snippet += f"主题：{'、'.join(topic_tags)}。"
         events.append(
             Event(
                 title=title,
@@ -561,6 +640,8 @@ def search_hackathoncom() -> list[Event]:
                 source="Hackathon.com",
                 snippet=snippet,
                 location=loc,
+                format=fmt,
+                themes="、".join(topic_tags),
                 is_hackathon_site=True,
             )
         )
@@ -592,6 +673,12 @@ def search_hackclub() -> list[Event]:
             loc = "、".join(
                 str(x) for x in (ev.get("city"), ev.get("state"), ev.get("country")) if x
             ) or "待确认"
+        if ev.get("hybrid"):
+            fmt = "混合"
+        elif ev.get("virtual"):
+            fmt = "线上"
+        else:
+            fmt = "线下"
         snippet = f"活动时间：{time_range}。地点：{loc}。Hack Club 策展的高中生黑客松。"
         events.append(
             Event(
@@ -601,6 +688,7 @@ def search_hackclub() -> list[Event]:
                 snippet=snippet,
                 location=loc,
                 competition_time=time_range,
+                format=fmt,
                 is_hackathon_site=True,
             )
         )
@@ -629,6 +717,7 @@ def search_eventbrite() -> list[Event]:
             time_range = _fmt_date_range(ev.get("startDate", ""), ev.get("endDate", ""))
             mode = ev.get("eventAttendanceMode") or ""
             loc = "线上" if "OnlineEventAttendanceMode" in mode else "待确认"
+            fmt = "线上" if "OnlineEventAttendanceMode" in mode else ("线下" if "OfflineEventAttendanceMode" in mode else "")
             desc = (ev.get("description") or "").strip()
             snippet = f"活动时间：{time_range}。地点：{loc}。"
             if desc:
@@ -641,6 +730,7 @@ def search_eventbrite() -> list[Event]:
                     snippet=snippet,
                     location=loc,
                     competition_time=time_range,
+                    format=fmt,
                 )
             )
     return events
@@ -686,6 +776,7 @@ def search_segmentfault() -> list[Event]:
         city = (it.get("city_name") or "").strip()
         cat = (it.get("category_name") or "").strip()
         loc = city or ("线上" if "线上" in cat else "待确认")
+        fmt = "线上" if "线上" in cat else ("线下" if "线下" in cat else "")
         snippet = (
             f"报名时间：{sign_start or '待确认'} ~ {sign_end or '待确认'}。"
             f"活动时间：{start or '待确认'} ~ {end or '待确认'}。地点：{loc}。"
@@ -700,6 +791,7 @@ def search_segmentfault() -> list[Event]:
                 signup_start=sign_start,
                 signup_deadline=sign_end,
                 competition_time=f"{start} ~ {end}" if start and end else "",
+                format=fmt,
             )
         )
     return events
@@ -732,6 +824,8 @@ def search_datafountain() -> list[Event]:
             for o in (c.get("organizers") or [])
             if (o.get("name") or "").strip()
         ][:2]
+        host = "、".join(orgs)
+        type_label = (c.get("typeLabel") or "").strip()
         snippet = f"赛事时间：{time_range}。奖励：{reward or '待确认'}。主办：{'、'.join(orgs) or '待确认'}。"
         events.append(
             Event(
@@ -740,6 +834,9 @@ def search_datafountain() -> list[Event]:
                 source="DataFountain",
                 snippet=snippet,
                 competition_time=time_range,
+                host=host,
+                prize=reward,
+                tags=type_label,
             )
         )
     return events
@@ -760,6 +857,7 @@ def search_lanqiao() -> list[Event]:
             time_range = _fmt_date_range(r.get("open_at", ""), r.get("end_at", ""))
             subject = (r.get("subject") or "").strip()
             desc = (r.get("description") or "").strip()
+            status = "已结束" if (r.get("status") or "") == "finished" else ""
             snippet = f"活动时间：{time_range}。科目：{subject or '待确认'}。{desc}"
             events.append(
                 Event(
@@ -768,6 +866,8 @@ def search_lanqiao() -> list[Event]:
                     source="蓝桥杯",
                     snippet=snippet,
                     competition_time=time_range,
+                    tags=subject,
+                    status=status,
                 )
             )
     return events
@@ -819,9 +919,26 @@ def search_devevent() -> list[Event]:
         while i < len(lines) and lines[i].strip() and not entry_re.match(lines[i]):
             details.append(lines[i].strip())
             i += 1
-        block = " ".join(details)
-        dm = re.search(r"(?:접수|일시):\s*(.+)", block)
-        date_seg = dm.group(1) if dm else ""
+        host = ""
+        cat_seg = ""
+        date_seg = ""
+        for dline in details:
+            dl = dline.strip()
+            m = re.match(r"[-–]?\s*주최:\s*(.+)", dl)
+            if m and not host:
+                host = m.group(1).strip()
+            m = re.match(r"[-–]?\s*분류:\s*(.+)", dl)
+            if m and not cat_seg:
+                cat_seg = m.group(1).strip()
+            m = re.match(r"[-–]?\s*(?:접수|일시):\s*(.+)", dl)
+            if m and not date_seg:
+                date_seg = m.group(1).strip()
+        fmt = "线上" if "온라인" in cat_seg else ("线下" if "오프라인" in cat_seg else "")
+        cat_tags = "、".join(
+            x.strip("`")
+            for x in re.findall(r"`([^`]+)`", cat_seg)
+            if x.strip("`")
+        )
         # 韩文日期形如“07. 10(금) ~ 08. 10(월)”→ 规范为“7月10日 ~ 8月10日”
         norm = re.sub(
             r"(\d{1,2})\.\s*(\d{1,2})",
@@ -836,6 +953,9 @@ def search_devevent() -> list[Event]:
                 url=url,
                 source="Dev-Event(GitHub聚合)",
                 snippet=snippet,
+                host=host,
+                format=fmt,
+                tags=cat_tags,
             )
         )
     return events
@@ -1021,6 +1141,143 @@ def is_in_future_window(ev: Event, today: dt.date, days: int = LOOKAHEAD_DAYS) -
     return False
 
 
+def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
+    """用 LLM（OpenAI 兼容接口，可接 DeepSeek）对每条信息做清洗与审核。
+
+    返回 (审核模式说明, 通过条数, 待人工确认条数, 剔除条数)。
+    未配置 API Key 或调用失败时降级为规则清洗，不影响主流程。
+    """
+    if not LLM_API_KEY:
+        for ev in events:
+            ev.review_status = "规则清洗（未配置 AI）"
+        return "规则清洗（未配置 AI）", len(events), 0, 0
+
+    mode = f"AI 审核（{LLM_MODEL}）"
+    prompt = (
+        "你是黑客松/编程马拉松信息审核助手。下面是抓取到的活动信息，请逐条清洗并审核。\n"
+        "清洗要求：修正标题里的噪音（如'报名倒计时''今晚截止'等前缀可去掉，保留活动名）；"
+        "从摘要中提取主办方、主题/赛道、奖金/奖池、报名条件、报名时间、报名截止、竞赛时间、"
+        "地点、形式（线上/线下/混合）、状态、标签。无法确定的字段留空字符串。\n"
+        "审核重点（按顺序判断）：\n"
+        "① 真实性：是否为真实可报名的黑客松/编程马拉松活动。课程广告、招聘、往期回顾、纯讲座、"
+        "会议、视频比赛、夏校等一律 keep=false，reason 写明'非黑客松活动'及具体类型。\n"
+        "② 时效性：是否为近期开始的活动（今天起未来约30天内）。活动时间明显已过、或属往期内容（如"
+        "标题带往年年份、'决赛直播''获奖名单'等）判 keep=false，reason 写明'活动已结束'。\n"
+        "③ 报名可行性：报名截止是否已过。已截止或活动已开始的判 keep=false，reason 写明"
+        "'报名已截止/活动已开始'及截止日期；只有无法判断活动时间、也无法判断报名截止是否已过的"
+        "才标记 needs_review=true。\n"
+        "注意：截止日期是'约数/待确认'、或活动时间取自聚合站结构化数据的，都算信息充分，"
+        "确认为真实且时间在近期内的直接 keep=true、needs_review=false。"
+        "其他信息明显缺失或可疑（如无法确认真实性）才标记 needs_review=true。"
+        "每条的 reason 用一句话中文说明。\n"
+        "只输出 JSON，格式：{\"items\":[{\"index\":0,\"keep\":true,\"needs_review\":false,"
+        "\"cleaned_title\":\"\",\"host\":\"\",\"themes\":\"\",\"prize\":\"\",\"eligibility\":\"\","
+        "\"signup_start\":\"\",\"signup_deadline\":\"\",\"competition_time\":\"\","
+        "\"location\":\"\",\"format\":\"\",\"status\":\"\",\"tags\":\"\",\"reason\":\"\"}]}"
+    )
+    items = [
+        {
+            "index": i,
+            "title": ev.title,
+            "url": ev.url,
+            "source": ev.source,
+            "snippet": (ev.snippet or "")[:300],
+            "signup_start": ev.signup_start,
+            "signup_deadline": ev.signup_deadline,
+            "competition_time": ev.competition_time,
+            "location": ev.location,
+        }
+        for i, ev in enumerate(events)
+    ]
+
+    passed = needs_review = dropped = 0
+    ok = False
+    batch_size = 15
+    for start in range(0, len(items), batch_size):
+        batch = items[start : start + batch_size]
+        payload = {
+            "model": LLM_MODEL,
+            "temperature": 0.2,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(batch, ensure_ascii=False)},
+            ],
+        }
+        try:
+            resp = requests.post(
+                f"{LLM_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                json={**payload, "response_format": {"type": "json_object"}},
+                timeout=90,
+            )
+            if resp.status_code not in (200, 201):
+                resp = requests.post(
+                    f"{LLM_BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=90,
+                )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"]
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
+            m = re.search(r"\{.*\}", content, re.S)
+            result = json.loads(m.group(0)) if m else {}
+            verdicts = result.get("items") if isinstance(result, dict) else result
+        except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
+            print(f"[warn] AI 审核批次失败: {exc}", file=sys.stderr)
+            for ev in events[start : start + batch_size]:
+                ev.review_status = "规则清洗（AI 调用失败）"
+            continue
+
+        by_index: dict[int, dict] = {}
+        for v in verdicts:
+            if not isinstance(v, dict):
+                continue
+            try:
+                by_index[int(v.get("index"))] = v
+            except (TypeError, ValueError):
+                continue
+        for offset, ev in enumerate(events[start : start + batch_size]):
+            v = by_index.get(start + offset)
+            if not v:
+                ev.review_status = "规则清洗（AI 无返回）"
+                continue
+            if not v.get("keep", True):
+                ev.review_status = "审核不通过"
+                ev.review_note = (v.get("reason") or "").strip()
+                dropped += 1
+                continue
+            if v.get("needs_review"):
+                ev.review_status = "待人工确认"
+                needs_review += 1
+            else:
+                ev.review_status = "AI 审核通过"
+                passed += 1
+            if v.get("reason"):
+                ev.review_note = (v.get("reason") or "").strip()
+            for field, key in (
+                ("title", "cleaned_title"),
+                ("host", "host"),
+                ("themes", "themes"),
+                ("prize", "prize"),
+                ("eligibility", "eligibility"),
+                ("signup_start", "signup_start"),
+                ("signup_deadline", "signup_deadline"),
+                ("competition_time", "competition_time"),
+                ("location", "location"),
+                ("format", "format"),
+                ("status", "status"),
+                ("tags", "tags"),
+            ):
+                val = (v.get(key) or "").strip()
+                if val:
+                    setattr(ev, field, val)
+        ok = True
+    if not ok:
+        mode = "规则清洗（AI 调用失败）"
+    return mode, passed, needs_review, dropped
+
+
 # ---------------------------------------------------------------------------
 # Notion
 # ---------------------------------------------------------------------------
@@ -1100,11 +1357,19 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
     dup_idx = dup_idx or set()
     children: list[dict] = []
     dup_count = len(dup_idx)
+    review_counts: dict[str, int] = {}
+    for ev in events:
+        if ev.review_status:
+            review_counts[ev.review_status] = review_counts.get(ev.review_status, 0) + 1
+    review_text = ""
+    if review_counts:
+        review_text = " 审核：" + "，".join(f"{k} {v} 条" for k, v in review_counts.items()) + "。"
     children.append(
         _text_block(
             "paragraph",
             f"**概览**：共收录 {len(events)} 条活动，覆盖 {date_str} 起未来 30 天内的黑客松/编程马拉松信息。"
-            + (f"其中 {dup_count} 条与历史已收录信息重合（已标注）。" if dup_count else ""),
+            + (f"其中 {dup_count} 条与历史已收录信息重合（已标注）。" if dup_count else "")
+            + review_text,
         )
     )
     children.append(_text_block("heading_2", "活动总览"))
@@ -1114,11 +1379,27 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
             title += " ⚠️已收录"
         children.append(_text_block("heading_3", title))
         # 字段列表：固定顺序 + 统一占位，保证标准格式
+        for label, val in (
+            ("🏢 主办方", ev.host),
+            ("📌 主题", ev.themes),
+            ("🏆 奖金", ev.prize),
+            ("👥 报名条件", ev.eligibility),
+            ("🌐 形式", ev.format),
+            ("🏷️ 标签", ev.tags),
+            ("🚦 状态", ev.status),
+        ):
+            if val:
+                children.append(_labeled_block("bulleted_list_item", label, val))
         children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start or "待确认"))
         children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline or "待确认"))
         children.append(_labeled_block("bulleted_list_item", "⏰ 竞赛时间", ev.competition_time or "待确认"))
         children.append(_labeled_block("bulleted_list_item", "📍 地点", ev.location or "待确认"))
         children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180] if ev.snippet else "待确认"))
+        if ev.review_status:
+            review_line = ev.review_status
+            if ev.review_note:
+                review_line += f"：{ev.review_note}"
+            children.append(_labeled_block("bulleted_list_item", "🔎 审核", review_line))
         if ev.url:
             children.append(_link_block("bulleted_list_item", "🔗 链接", "查看详情", ev.url))
         else:
@@ -1179,23 +1460,33 @@ def normalize_title(title: str) -> str:
     return text
 
 
-def load_archive_titles() -> set[str]:
-    """读取黑客松信息库中已收录的活动标题（归一化后），用于查重。"""
-    titles: set[str] = set()
+def _load_archive() -> dict:
+    """读取服务器端历史信息库（archive.json）。"""
+    if not ARCHIVE_FILE.exists():
+        print(f"[warn] 服务器端信息库不存在 {ARCHIVE_FILE}，按空库处理", file=sys.stderr)
+        return {"updated": "", "entries": {}}
     try:
-        rows = query_database_rows(DB_ARCHIVE_ID)
-    except RuntimeError as exc:
-        print(f"[warn] 无法读取黑客松信息库，跳过查重: {exc}", file=sys.stderr)
-        return titles
-    for row in rows:
-        props = row.get("properties", {})
-        for p in props.values():
-            if p.get("type") == "title":
-                title = "".join(t.get("plain_text", "") for t in p.get("title", []))
-                if title.strip():
-                    titles.add(normalize_title(title))
-                break
-    return titles
+        with open(ARCHIVE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"updated": "", "entries": {}}
+    except (OSError, ValueError) as exc:
+        print(f"[warn] 读取服务器端信息库失败，按空库处理: {exc}", file=sys.stderr)
+        return {"updated": "", "entries": {}}
+
+
+def _save_archive(data: dict) -> None:
+    """原子写入服务器端历史信息库（archive.json）。"""
+    ARCHIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ARCHIVE_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, ARCHIVE_FILE)
+
+
+def load_archive_titles() -> set[str]:
+    """读取服务器端信息库中已收录的活动标题（归一化后），用于查重。"""
+    data = _load_archive()
+    return set(data.get("entries", {}).keys())
 
 
 def find_duplicates(events: list[Event], archive_titles: set[str]) -> set[int]:
@@ -1216,44 +1507,38 @@ def find_duplicates(events: list[Event], archive_titles: set[str]) -> set[int]:
 
 
 def write_to_archive(date_str: str, events: list[Event]) -> None:
-    """把今天搜到的活动累积写入黑客松信息库（按归一化标题去重）。"""
-    title_prop = "名称"
-    try:
-        archive_titles = load_archive_titles()
-    except RuntimeError:
-        return
+    """把今天搜到的活动累积写入服务器端信息库 archive.json（按归一化标题去重）。"""
+    data = _load_archive()
+    entries = data.get("entries", {})
     written = 0
     for ev in events:
         norm = normalize_title(ev.title)
-        if not norm or norm in archive_titles:
+        if not norm or norm in entries:
             continue
-        properties: dict = {
-            title_prop: {"title": [{"type": "text", "text": {"content": (ev.title or "")[:190]}}]},
+        dl = ev.signup_deadline[:10] if ev.signup_deadline and ev.signup_deadline[:4].isdigit() else ""
+        entries[norm] = {
+            "title": (ev.title or "")[:190],
+            "first_seen": date_str,
+            "url": ev.url,
+            "source": ev.source,
+            "location": ev.location,
+            "deadline": dl,
+            "competition_time": ev.competition_time,
+            "host": ev.host,
+            "themes": ev.themes,
+            "prize": ev.prize,
+            "eligibility": ev.eligibility,
+            "format": ev.format,
+            "tags": ev.tags,
+            "status": ev.status,
+            "review_status": ev.review_status,
+            "summary": (ev.snippet or "")[:500],
         }
-        if ev.location:
-            properties["地点"] = {"rich_text": [{"type": "text", "text": {"content": ev.location[:190]}}]}
-        if ev.url:
-            properties["来源链接"] = {"url": ev.url}
-        summary_parts = []
-        if ev.signup_deadline:
-            dl = ev.signup_deadline[:10]
-            if dl[:4].isdigit():
-                properties["报名截止"] = {"date": {"start": dl}}
-            else:
-                summary_parts.append(f"报名截止：{ev.signup_deadline}")
-        if ev.competition_time:
-            summary_parts.append(f"竞赛时间：{ev.competition_time}")
-        if ev.snippet:
-            summary_parts.append(ev.snippet)
-        if summary_parts:
-            properties["摘要"] = {"rich_text": [{"type": "text", "text": {"content": "；".join(summary_parts)[:200]}}]}
-        properties["日期"] = {"date": {"start": date_str}}
-        try:
-            notion_create_page({"type": "database_id", "database_id": DB_ARCHIVE_ID}, properties)
-            archive_titles.add(norm)
-            written += 1
-        except RuntimeError as exc:
-            print(f"[warn] 写入信息库失败 {ev.title[:30]}: {exc}", file=sys.stderr)
+        written += 1
+    if written:
+        data["entries"] = entries
+        data["updated"] = date_str
+        _save_archive(data)
     print(f"[info] 信息库新增 {written} 条")
 
 
@@ -1354,6 +1639,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="只搜索并打印，不写入 Notion")
     parser.add_argument("--search-only", action="store_true", help="同 --dry-run")
     parser.add_argument("--check-notion", action="store_true", help="只验证 Notion 连接与结构")
+    parser.add_argument("--no-ai", action="store_true", help="跳过 AI 清洗/审核（仅规则清洗）")
     args = parser.parse_args()
 
     if args.check_notion:
@@ -1384,6 +1670,15 @@ def main() -> int:
     unique = [ev for ev in unique if is_in_future_window(ev, today)]
     for ev in unique:
         extract_fields(ev, today)
+
+    # AI 清洗与审核：真实黑客松？近期开始？报名还来得及？（未配置 Key 时自动降级）
+    if not args.no_ai:
+        mode, passed, needs_review, dropped = ai_clean_and_review(unique)
+        unique = [ev for ev in unique if ev.review_status != "审核不通过"]
+        print(
+            f"[info] {mode}：通过 {passed} 条，待人工确认 {needs_review} 条，"
+            f"剔除 {dropped} 条，剩余 {len(unique)} 条"
+        )
 
     print(f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内）")
     for ev in unique[:MAX_EVENTS]:
