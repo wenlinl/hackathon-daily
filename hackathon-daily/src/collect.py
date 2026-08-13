@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import json
 import os
@@ -54,6 +55,62 @@ if not LLM_API_KEY and _DEEPSEEK_KEY:
 LOOKAHEAD_DAYS = 30
 # 单日汇总最多展示/入库的活动条数
 MAX_EVENTS = 50
+# 单日最多做 AI 重新检索核对的活动条数（控制耗时与费用）
+
+
+def _env_int(name: str, default: int) -> int:
+    val = os.environ.get(name, "").strip()
+    try:
+        return int(val)
+    except ValueError:
+        return default
+
+
+VERIFY_MAX_EVENTS = _env_int("VERIFY_MAX_EVENTS", 15)
+
+# ---------------------------------------------------------------------------
+# 信息核对标准（创建每条信息时按此核对）
+# ---------------------------------------------------------------------------
+VERIFY_STANDARDS = [
+    "真实性：主办方真实存在，活动在其官网/官方公众号/官方开发者平台可查；来源优先官方>权威媒体>聚合/个人",
+    "时间准确性：报名开始、报名截止、竞赛时间须与官方页面一致；多个独立来源一致才判'已核对'，冲突标记'信息冲突'",
+    "链接有效性：报名/官网链接可访问，域名与主办方匹配；可疑域名或失效链接标记'待确认'",
+    "字段完整性：报名时间、报名截止、竞赛时间、地点、主办方五项齐全才算'完整'，缺项在核对说明中列出",
+]
+
+# 国内大厂/知名技术微信公众号（搜狗微信索引定向补充）
+WECHAT_ACCOUNTS = [
+    "腾讯云开发者社区",
+    "腾讯技术工程",
+    "阿里云开发者",
+    "飞桨PaddlePaddle",
+    "百度AI",
+    "字节跳动技术团队",
+    "华为开发者联盟服务",
+    "华为云",
+    "美团技术团队",
+    "京东云开发者",
+    "蚂蚁技术AntTech",
+    "科大讯飞开放平台",
+    "智谱AI",
+    "深度求索",
+    "机器之心",
+    "量子位",
+    "InfoQ",
+    "开源中国OSCHINA",
+    "51CTO技术栈",
+    "CSDN",
+]
+
+# 小红书（通过搜索引擎 site: 索引抓取公开帖子）
+XIAOHONGSHU_QUERIES = [
+    "site:xiaohongshu.com 黑客松 报名",
+    "site:xiaohongshu.com 黑客松 2026",
+    "site:xiaohongshu.com hackathon 报名",
+    "site:xiaohongshu.com 编程马拉松",
+    "小红书 黑客松 报名 2026",
+    "小红书 黑客松 巅峰赛",
+]
 
 # 常见城市/地点关键词（用于提取活动地点）
 CITY_HINTS = [
@@ -179,6 +236,9 @@ class Event:
     tags: str = ""           # 标签
     review_status: str = ""  # AI 审核状态
     review_note: str = ""    # 审核说明
+    verify_status: str = ""  # 核对状态：已核对/部分核对/信息冲突/未能核对
+    verify_note: str = ""    # 核对说明
+    official_url: str = ""   # 核对后确认的官方/权威链接
 
     def as_markdown(self) -> str:
         parts = [f"### {self.title}"]
@@ -207,8 +267,15 @@ class Event:
             parts.append("📍 地点：待确认")
         parts.append(f"摘要：{self.snippet[:180] if self.snippet else '待确认'}")
         parts.append(f"🔗 链接：{self.url if self.url else '待确认'}")
+        if self.official_url and self.official_url != self.url:
+            parts.append(f"✅ 官方链接：{self.official_url}")
         if self.review_status:
             parts.append(f"🔎 审核：{self.review_status}")
+        if self.verify_status:
+            line = self.verify_status
+            if self.verify_note:
+                line += f"：{self.verify_note}"
+            parts.append(f"🔬 核对：{line}")
         return "\n".join(parts)
 
 
@@ -281,8 +348,8 @@ def search_duckduckgo(query: str) -> list[Event]:
     return events
 
 
-def search_sogou_weixin(query: str) -> list[Event]:
-    """搜狗微信搜索（公开索引，仅公众号文章）。"""
+def _sogou_weixin_query(query: str) -> list[Event]:
+    """搜狗微信文章搜索（公开索引，仅公众号文章）。"""
     events: list[Event] = []
     url = f"https://weixin.sogou.com/weixin?type=2&query={quote_plus(query)}"
     html = _fetch(url)
@@ -310,6 +377,63 @@ def search_sogou_weixin(query: str) -> list[Event]:
                     host=host,
                 )
             )
+    return events
+
+
+def search_sogou_weixin(query: str) -> list[Event]:
+    """搜狗微信搜索（关键词入口）。"""
+    return _sogou_weixin_query(query)
+
+
+def search_wechat_accounts() -> list[Event]:
+    """定向补充：国内大厂/知名技术公众号的公众号文章（搜狗微信索引）。"""
+    events: list[Event] = []
+    failures = 0
+    for account in WECHAT_ACCOUNTS:
+        if failures >= 3:
+            print("[warn] 搜狗微信连续失败，停止公众号定向抓取", file=sys.stderr)
+            break
+        query = f"{account} 黑客松"
+        try:
+            found = _sogou_weixin_query(query)
+        except Exception as exc:  # noqa: BLE001
+            failures += 1
+            print(f"[warn] 公众号 {account} 抓取失败: {exc}", file=sys.stderr)
+            continue
+        if not found:
+            failures += 1
+        else:
+            failures = 0
+            for ev in found:
+                ev.source = f"公众号({account})"
+                events.append(ev)
+        time.sleep(2)
+    return events
+
+
+def search_xiaohongshu() -> list[Event]:
+    """小红书公开帖子（通过搜索引擎 site: 索引）。"""
+    events: list[Event] = []
+    seen: set[str] = set()
+    for q in XIAOHONGSHU_QUERIES:
+        try:
+            found = search_bing(q)
+            if not found:
+                found = search_duckduckgo(q)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] 小红书检索失败 {q}: {exc}", file=sys.stderr)
+            continue
+        for ev in found:
+            # 只保留真实来自小红书域名的结果
+            if "xiaohongshu.com" not in (ev.url or ""):
+                continue
+            key = normalize_title(ev.title)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ev.source = "小红书(搜索引擎索引)"
+            events.append(ev)
+        time.sleep(1)
     return events
 
 
@@ -977,6 +1101,8 @@ def search_all() -> list[Event]:
         search_datafountain,
         search_lanqiao,
         search_devevent,
+        search_wechat_accounts,
+        search_xiaohongshu,
     ):
         try:
             found = fn()
@@ -1278,6 +1404,219 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
     return mode, passed, needs_review, dropped
 
 
+def _llm_completion(system_prompt: str, user_content: str, timeout: int = 90) -> dict | None:
+    """调用 OpenAI 兼容 LLM（DeepSeek 等），返回解析后的 JSON dict。"""
+    payload = {
+        "model": LLM_MODEL,
+        "temperature": 0.2,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+    }
+    try:
+        resp = requests.post(
+            f"{LLM_BASE_URL}/chat/completions",
+            headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+            json={**payload, "response_format": {"type": "json_object"}},
+            timeout=timeout,
+        )
+        if resp.status_code not in (200, 201):
+            resp = requests.post(
+                f"{LLM_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=timeout,
+            )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
+        m = re.search(r"\{.*\}", content, re.S)
+        return json.loads(m.group(0)) if m else None
+    except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
+        print(f"[warn] LLM 调用失败: {exc}", file=sys.stderr)
+        return None
+
+
+def _official_score(url: str, ev: Event) -> int:
+    """候选来源打分：与已知链接同域名最高，官方/活动平台域名加分。"""
+    if not url:
+        return 0
+    try:
+        from urllib.parse import urlparse
+
+        dom = urlparse(url).netloc.lower().replace("www.", "")
+        ev_dom = urlparse(ev.url or "").netloc.lower().replace("www.", "")
+    except ValueError:
+        return 0
+    score = 0
+    if ev_dom and dom == ev_dom:
+        score += 3
+    for kw in (
+        "mlh",
+        "devfolio",
+        "hackathon",
+        "event",
+        "contest",
+        "competition",
+        "hack",
+        "lu.ma",
+        "eventbrite",
+        "huodongxing",
+        "saikr",
+    ):
+        if kw in dom:
+            score += 1
+    return score
+
+
+def verify_events(events: list[Event]) -> tuple[int, int, int]:
+    """AI 重新检索核对：定向搜索→抓候选页→LLM 提取准确字段（尤其时间）。
+
+    返回 (已核对, 部分核对, 未能核对)。未配置 AI Key 时整体标记未核对。
+    """
+    if not LLM_API_KEY:
+        for ev in events:
+            ev.verify_status = "未核对（未配置 AI）"
+        return 0, 0, len(events)
+
+    targets = events[:VERIFY_MAX_EVENTS]
+    for ev in events[VERIFY_MAX_EVENTS:]:
+        ev.verify_status = "未核对（超出核对上限）"
+
+    candidates: dict[int, list[dict]] = {}
+
+    def gather(idx: int, ev: Event) -> None:
+        urls: list[str] = []
+        try:
+            for q in (f"{ev.title} 报名 截止", f"{ev.title} hackathon registration"):
+                found = search_bing(q)
+                for r in found[:3]:
+                    if r.url and r.url not in urls:
+                        urls.append(r.url)
+                if not found:
+                    found = search_duckduckgo(q)
+                    for r in found[:3]:
+                        if r.url and r.url not in urls:
+                            urls.append(r.url)
+                time.sleep(0.4)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] 核对搜索失败 {ev.title[:30]}: {exc}", file=sys.stderr)
+        pages: list[dict] = []
+        for u in urls[:3]:
+            text = _fetch(u, timeout=12)
+            if not text:
+                continue
+            try:
+                soup = BeautifulSoup(text, "lxml")
+                body = soup.get_text(" ", strip=True)
+            except Exception:  # noqa: BLE001
+                body = ""
+            if body:
+                pages.append({"url": u, "text": body[:2500]})
+        pages.sort(key=lambda p: _official_score(p["url"], ev), reverse=True)
+        candidates[idx] = pages[:3]
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for idx, ev in enumerate(targets):
+            pool.submit(gather, idx, ev)
+
+    verify_prompt = (
+        "你是黑客松信息核对员。针对每条活动，我会给你：当前已知信息，以及搜索引擎抓到的候选网页"
+        "（标题/URL/正文片段）。请按以下标准核对：\n"
+        "1) 找出最可能是官方报名页或权威来源的链接，填入 official_url；\n"
+        "2) 提取准确字段，**尤其是报名开始时间、报名截止时间、竞赛时间**，必须是具体日期"
+        "（YYYY-MM-DD 或 X月X日，可从正文推断年份）；已知信息与候选网页一致就保留，"
+        "不一致以多个来源交叉验证后的结果为准；\n"
+        "3) 判定：有官方/权威来源且时间明确 → confidence=high；有来源但部分字段缺失 → medium；"
+        "找不到可靠来源或时间无法确定 → low；候选来源之间时间冲突 → conflict=true；\n"
+        "4) 核对标准：主办方真实可查、时间与官方一致、链接可访问、报名时间/报名截止/竞赛时间/"
+        "地点/主办方五项尽量齐全，缺项在 note 中列出。\n"
+        "只输出 JSON：{\"items\":[{\"index\":0,\"official_url\":\"\","
+        "\"fields\":{\"signup_start\":\"\",\"signup_deadline\":\"\",\"competition_time\":\"\","
+        "\"location\":\"\",\"host\":\"\",\"prize\":\"\",\"eligibility\":\"\",\"format\":\"\","
+        "\"status\":\"\"},\"confidence\":\"high\",\"conflict\":false,"
+        "\"note\":\"一句话中文说明\"}]}"
+    )
+
+    verified = partial = failed = 0
+    for start in range(0, len(targets), 5):
+        batch = []
+        for idx in range(start, min(start + 5, len(targets))):
+            ev = targets[idx]
+            batch.append(
+                {
+                    "index": idx,
+                    "title": ev.title,
+                    "url": ev.url,
+                    "known": {
+                        "signup_start": ev.signup_start,
+                        "signup_deadline": ev.signup_deadline,
+                        "competition_time": ev.competition_time,
+                        "location": ev.location,
+                        "host": ev.host,
+                        "prize": ev.prize,
+                        "eligibility": ev.eligibility,
+                        "format": ev.format,
+                        "status": ev.status,
+                    },
+                    "candidates": candidates.get(idx, []),
+                }
+            )
+        result = _llm_completion(
+            verify_prompt, json.dumps(batch, ensure_ascii=False), timeout=120
+        )
+        if not result:
+            for ev in targets[start : start + 5]:
+                ev.verify_status = "未能核对（AI 调用失败）"
+                failed += 1
+            continue
+        verdicts = result.get("items") if isinstance(result, dict) else []
+        for v in verdicts:
+            if not isinstance(v, dict):
+                continue
+            try:
+                idx = int(v.get("index"))
+            except (TypeError, ValueError):
+                continue
+            if idx >= len(targets):
+                continue
+            ev = targets[idx]
+            fields = v.get("fields") or {}
+            for field, key in (
+                ("signup_start", "signup_start"),
+                ("signup_deadline", "signup_deadline"),
+                ("competition_time", "competition_time"),
+                ("location", "location"),
+                ("host", "host"),
+                ("prize", "prize"),
+                ("eligibility", "eligibility"),
+                ("format", "format"),
+                ("status", "status"),
+            ):
+                val = (fields.get(key) or "").strip()
+                if val:
+                    setattr(ev, field, val)
+            official = (v.get("official_url") or "").strip()
+            if official:
+                ev.official_url = official
+            conf = (v.get("confidence") or "low").lower()
+            if v.get("conflict"):
+                ev.verify_status = "信息冲突"
+                failed += 1
+            elif conf == "high":
+                ev.verify_status = "已核对"
+                verified += 1
+            elif conf == "medium":
+                ev.verify_status = "部分核对"
+                partial += 1
+            else:
+                ev.verify_status = "未能核对"
+                failed += 1
+            ev.verify_note = (v.get("note") or "").strip()
+    return verified, partial, failed
+
+
 # ---------------------------------------------------------------------------
 # Notion
 # ---------------------------------------------------------------------------
@@ -1364,12 +1703,20 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
     review_text = ""
     if review_counts:
         review_text = " 审核：" + "，".join(f"{k} {v} 条" for k, v in review_counts.items()) + "。"
+    verify_counts: dict[str, int] = {}
+    for ev in events:
+        if ev.verify_status:
+            verify_counts[ev.verify_status] = verify_counts.get(ev.verify_status, 0) + 1
+    verify_text = ""
+    if verify_counts:
+        verify_text = " 核对：" + "，".join(f"{k} {v} 条" for k, v in verify_counts.items()) + "。"
     children.append(
         _text_block(
             "paragraph",
             f"**概览**：共收录 {len(events)} 条活动，覆盖 {date_str} 起未来 30 天内的黑客松/编程马拉松信息。"
             + (f"其中 {dup_count} 条与历史已收录信息重合（已标注）。" if dup_count else "")
-            + review_text,
+            + review_text
+            + verify_text,
         )
     )
     children.append(_text_block("heading_2", "活动总览"))
@@ -1400,6 +1747,13 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
             if ev.review_note:
                 review_line += f"：{ev.review_note}"
             children.append(_labeled_block("bulleted_list_item", "🔎 审核", review_line))
+        if ev.verify_status:
+            verify_line = ev.verify_status
+            if ev.verify_note:
+                verify_line += f"：{ev.verify_note}"
+            children.append(_labeled_block("bulleted_list_item", "🔬 核对", verify_line))
+        if ev.official_url and ev.official_url != ev.url:
+            children.append(_link_block("bulleted_list_item", "✅ 官方链接", "查看详情", ev.official_url))
         if ev.url:
             children.append(_link_block("bulleted_list_item", "🔗 链接", "查看详情", ev.url))
         else:
@@ -1454,7 +1808,7 @@ def query_database_rows(db_id: str) -> list[dict]:
 def normalize_title(title: str) -> str:
     """标题归一化：小写、去空白/标点，用于查重比较。"""
     text = (title or "").lower()
-    text = re.sub(r"[\s,，。.;；:：!！?？|｜\-—_/\\()（）\[\]【】]+", "", text)
+    text = re.sub(r"[\s,，。.;；:：!！?？|｜\-—_/\\()（）\[\]【】·×&＆#+*~<>《》「」『』]+", "", text)
     # 去掉常见修饰前缀/后缀，减少误判
     text = re.sub(r"^(2026)?[年]?", "", text)
     return text
@@ -1640,6 +1994,7 @@ def main() -> int:
     parser.add_argument("--search-only", action="store_true", help="同 --dry-run")
     parser.add_argument("--check-notion", action="store_true", help="只验证 Notion 连接与结构")
     parser.add_argument("--no-ai", action="store_true", help="跳过 AI 清洗/审核（仅规则清洗）")
+    parser.add_argument("--no-verify", action="store_true", help="跳过 AI 重新检索核对")
     args = parser.parse_args()
 
     if args.check_notion:
@@ -1679,6 +2034,27 @@ def main() -> int:
             f"[info] {mode}：通过 {passed} 条，待人工确认 {needs_review} 条，"
             f"剔除 {dropped} 条，剩余 {len(unique)} 条"
         )
+        # AI 清洗可能把不同原文归一成同一标题，去重一次
+        seen_titles: set[str] = set()
+        deduped: list[Event] = []
+        for ev in unique:
+            key = normalize_title(ev.title)
+            if not key or key in seen_titles:
+                continue
+            seen_titles.add(key)
+            deduped.append(ev)
+        unique = deduped
+
+    # AI 重新检索核对：定向搜索官方来源并提取准确时间等字段（按核对标准）
+    if not args.no_verify:
+        verified, partial, failed = verify_events(unique)
+        print(
+            f"[info] 核对：已核对 {verified}，部分核对 {partial}，"
+            f"未能核对 {failed}（共 {len(unique)} 条，上限 {VERIFY_MAX_EVENTS}）"
+        )
+        # 核对可能修正了时间字段，重新提取一次，保证日历日期准确
+        for ev in unique:
+            extract_fields(ev, today)
 
     print(f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内）")
     for ev in unique[:MAX_EVENTS]:
