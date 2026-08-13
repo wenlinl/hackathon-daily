@@ -33,6 +33,7 @@ NOTION_VERSION = "2022-06-28"
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
 DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（日历视图所在）
+DB_ARCHIVE_ID = "3bb60e0b0bbf8179aa88d98a77a635ef"        # "黑客松信息库"（历史查重）
 
 # 只展示今天起未来 N 天内的活动
 LOOKAHEAD_DAYS = 30
@@ -462,18 +463,24 @@ def _link_block(block_type: str, label: str, text: str, url: str) -> dict:
     }
 
 
-def build_summary_children(date_str: str, events: list[Event]) -> list[dict]:
+def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int] | None = None) -> list[dict]:
     """构建当天汇总的 Notion 子块（直接写入数据库记录正文）。"""
+    dup_idx = dup_idx or set()
     children: list[dict] = []
+    dup_count = len(dup_idx)
     children.append(
         _text_block(
             "paragraph",
-            f"**概览**：共收录 {len(events)} 条活动，覆盖 {date_str} 起未来 30 天内的黑客松/编程马拉松信息。",
+            f"**概览**：共收录 {len(events)} 条活动，覆盖 {date_str} 起未来 30 天内的黑客松/编程马拉松信息。"
+            + (f"其中 {dup_count} 条与历史已收录信息重合（已标注）。" if dup_count else ""),
         )
     )
     children.append(_text_block("heading_2", "活动总览"))
     for i, ev in enumerate(events, 1):
-        children.append(_text_block("heading_3", f"{i}. {ev.title}"))
+        title = f"{i}. {ev.title}"
+        if i - 1 in dup_idx:
+            title += " ⚠️已收录"
+        children.append(_text_block("heading_3", title))
         # 字段列表：固定顺序 + 统一占位，保证标准格式
         children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start or "待确认"))
         children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline or "待确认"))
@@ -497,6 +504,13 @@ def build_summary_children(date_str: str, events: list[Event]) -> list[dict]:
             "💡 点击来源链接可查看完整报名信息；无法判断日期的条目已保留供人工确认。",
         )
     )
+    if dup_count:
+        children.append(
+            _text_block(
+                "bulleted_list_item",
+                "⚠️ 标有'已收录'的活动与黑客松信息库中的历史条目重合，可能为同一活动或往期重复信息。",
+            )
+        )
     return children
 
 
@@ -524,7 +538,94 @@ def query_database_rows(db_id: str) -> list[dict]:
     return rows
 
 
-def write_to_calendar(date_str: str, events: list[Event]) -> None:
+def normalize_title(title: str) -> str:
+    """标题归一化：小写、去空白/标点，用于查重比较。"""
+    text = (title or "").lower()
+    text = re.sub(r"[\s,，。.;；:：!！?？|｜\-—_/\\()（）\[\]【】]+", "", text)
+    # 去掉常见修饰前缀/后缀，减少误判
+    text = re.sub(r"^(2026)?[年]?", "", text)
+    return text
+
+
+def load_archive_titles() -> set[str]:
+    """读取黑客松信息库中已收录的活动标题（归一化后），用于查重。"""
+    titles: set[str] = set()
+    try:
+        rows = query_database_rows(DB_ARCHIVE_ID)
+    except RuntimeError as exc:
+        print(f"[warn] 无法读取黑客松信息库，跳过查重: {exc}", file=sys.stderr)
+        return titles
+    for row in rows:
+        props = row.get("properties", {})
+        for p in props.values():
+            if p.get("type") == "title":
+                title = "".join(t.get("plain_text", "") for t in p.get("title", []))
+                if title.strip():
+                    titles.add(normalize_title(title))
+                break
+    return titles
+
+
+def find_duplicates(events: list[Event], archive_titles: set[str]) -> set[int]:
+    """返回与历史库重合的活动索引。匹配规则：标题归一化后完全一致，或一方包含另一方。"""
+    dup_idx: set[int] = set()
+    for i, ev in enumerate(events):
+        norm = normalize_title(ev.title)
+        if not norm:
+            continue
+        if norm in archive_titles:
+            dup_idx.add(i)
+            continue
+        for hist in archive_titles:
+            if len(norm) >= 8 and len(hist) >= 8 and (norm in hist or hist in norm):
+                dup_idx.add(i)
+                break
+    return dup_idx
+
+
+def write_to_archive(date_str: str, events: list[Event]) -> None:
+    """把今天搜到的活动累积写入黑客松信息库（按归一化标题去重）。"""
+    title_prop = "名称"
+    try:
+        archive_titles = load_archive_titles()
+    except RuntimeError:
+        return
+    written = 0
+    for ev in events:
+        norm = normalize_title(ev.title)
+        if not norm or norm in archive_titles:
+            continue
+        properties: dict = {
+            title_prop: {"title": [{"type": "text", "text": {"content": (ev.title or "")[:190]}}]},
+        }
+        if ev.location:
+            properties["地点"] = {"rich_text": [{"type": "text", "text": {"content": ev.location[:190]}}]}
+        if ev.url:
+            properties["来源链接"] = {"url": ev.url}
+        summary_parts = []
+        if ev.signup_deadline:
+            dl = ev.signup_deadline[:10]
+            if dl[:4].isdigit():
+                properties["报名截止"] = {"date": {"start": dl}}
+            else:
+                summary_parts.append(f"报名截止：{ev.signup_deadline}")
+        if ev.competition_time:
+            summary_parts.append(f"竞赛时间：{ev.competition_time}")
+        if ev.snippet:
+            summary_parts.append(ev.snippet)
+        if summary_parts:
+            properties["摘要"] = {"rich_text": [{"type": "text", "text": {"content": "；".join(summary_parts)[:200]}}]}
+        properties["日期"] = {"date": {"start": date_str}}
+        try:
+            notion_create_page({"type": "database_id", "database_id": DB_ARCHIVE_ID}, properties)
+            archive_titles.add(norm)
+            written += 1
+        except RuntimeError as exc:
+            print(f"[warn] 写入信息库失败 {ev.title[:30]}: {exc}", file=sys.stderr)
+    print(f"[info] 信息库新增 {written} 条")
+
+
+def write_to_calendar(date_str: str, events: list[Event], dup_idx: set[int] | None = None) -> None:
     """把当天汇总直接写入 2026 数据库（日历视图）当天记录，正文包含全部活动详情。"""
     title_prop = "名称"  # 2026 数据库标题属性（已验证）
     try:
@@ -567,7 +668,7 @@ def write_to_calendar(date_str: str, events: list[Event]) -> None:
     if (title, date_str) in existing_keys:
         print(f"[skip] 日历已存在: {title} @ {date_str}")
         return
-    children = build_summary_children(date_str, events)
+    children = build_summary_children(date_str, events, dup_idx)
     first_batch = children[:90]
     rest = children[90:]
     properties = {
@@ -659,10 +760,19 @@ def main() -> int:
             f"{ev.signup_deadline or '截止待确认'} | 日历:{ev.calendar_date}"
         )
 
+    # 查重：与黑客松信息库中的历史条目比对
+    archive_titles = load_archive_titles()
+    dup_idx = find_duplicates(unique[:30], archive_titles)
+    print(f"[info] 查重完成：{len(dup_idx)} 条与历史重合")
+    for i in sorted(dup_idx):
+        print(f"  ⚠️ 重合: {unique[i].title[:50]}")
+
     if dry_run:
         print("\n[dry-run] 以下为将写入 Notion 的汇总：")
         print(f"# {date_str} 黑客松活动汇总")
-        for ev in unique[:30]:
+        for i, ev in enumerate(unique[:30]):
+            tag = " ⚠️已收录" if i in dup_idx else ""
+            print(ev.as_markdown().replace(f"### {ev.title}", f"### {ev.title}{tag}"))
             print(ev.as_markdown())
             print(f"  日历日期：{ev.calendar_date}")
         return 0
@@ -670,7 +780,8 @@ def main() -> int:
     if not unique:
         print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
-    write_to_calendar(date_str, unique[:30])
+    write_to_archive(date_str, unique[:30])
+    write_to_calendar(date_str, unique[:30], dup_idx)
     print("[done] 全部完成")
     return 0
 
