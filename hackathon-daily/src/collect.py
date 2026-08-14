@@ -1887,6 +1887,36 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
     return children
 
 
+def select_balanced(events: list[Event], limit: int = MAX_EVENTS) -> list[Event]:
+    """按 国内/国外/线上 分组比例均衡选取最多 limit 条，避免某一组被截断。"""
+    buckets: dict[str, list[Event]] = {"国内": [], "国外": [], "线上": []}
+    for ev in events:
+        buckets.setdefault(ev.region or "国内", []).append(ev)
+    total = len(events)
+    if not total:
+        return []
+    quota: dict[str, int] = {}
+    for k, v in buckets.items():
+        quota[k] = min(len(v), round(limit * len(v) / total))
+    leftover = limit - sum(quota.values())
+    for k in ("国内", "国外", "线上"):
+        if leftover > 0:
+            add = min(leftover, len(buckets[k]) - quota[k])
+            quota[k] += add
+            leftover -= add
+    if leftover < 0:
+        for k in ("线上", "国外", "国内"):
+            if leftover >= 0:
+                break
+            cut = min(-leftover, quota[k])
+            quota[k] -= cut
+            leftover += cut
+    selected: list[Event] = []
+    for k in ("国内", "国外", "线上"):
+        selected.extend(buckets[k][: quota[k]])
+    return selected
+
+
 def query_database_rows(db_id: str) -> list[dict]:
     """查询数据库现有行，用于去重。"""
     rows: list[dict] = []
@@ -2305,8 +2335,13 @@ def main() -> int:
             ev.region = classify_region(ev)
     unique.sort(key=lambda ev: (REGION_ORDER.get(ev.region, 3), 0))
 
-    print(f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内）")
-    for ev in unique[:MAX_EVENTS]:
+    # 按 国内/国外/线上 分组比例均衡选取，避免某组被上限截断
+    selected = select_balanced(unique, MAX_EVENTS)
+    print(
+        f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内），"
+        f"今日展示 {len(selected)} 条"
+    )
+    for ev in selected:
         print(
             f"  - {ev.title} | {ev.location or '地点待确认'} | "
             f"{ev.signup_deadline or '截止待确认'} | 日历:{ev.calendar_date}"
@@ -2314,7 +2349,7 @@ def main() -> int:
 
     # 查重：与黑客松信息库中的历史条目比对
     archive_titles = load_archive_titles()
-    dup_idx = find_duplicates(unique[:MAX_EVENTS], archive_titles)
+    dup_idx = find_duplicates(selected, archive_titles)
     print(f"[info] 查重完成：{len(dup_idx)} 条与历史重合")
     for i in sorted(dup_idx):
         print(f"  ⚠️ 重合: {unique[i].title[:50]}")
@@ -2322,7 +2357,7 @@ def main() -> int:
     if dry_run:
         print("\n[dry-run] 以下为将写入 Notion 的汇总：")
         print(f"# {date_str} 黑客松活动汇总")
-        for i, ev in enumerate(unique[:MAX_EVENTS]):
+        for i, ev in enumerate(selected):
             tag = " ⚠️已收录" if i in dup_idx else ""
             print(ev.as_markdown().replace(f"### {ev.title}", f"### {ev.title}{tag}"))
             print(f"  日历日期：{ev.calendar_date}")
@@ -2331,9 +2366,9 @@ def main() -> int:
     if not unique:
         print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
 
-    write_to_archive(date_str, unique[:MAX_EVENTS])
+    write_to_archive(date_str, selected)
     build_archive_html()
-    write_to_calendar(date_str, unique[:MAX_EVENTS], dup_idx)
+    write_to_calendar(date_str, selected, dup_idx)
     print("[done] 全部完成")
     return 0
 
