@@ -2191,6 +2191,12 @@ def write_to_calendar(date_str: str, events: list[Event], dup_idx: set[int] | No
         if "黑客松活动汇总" in title:
             summary_ids.append(row["id"])
 
+    title = f"{date_str} 黑客松活动汇总（{len(events)} 条）"
+    # 同日同标题已存在 → 直接跳过（避免把现有记录归档后又不重建）
+    if (title, date_str) in existing_keys:
+        print(f"[skip] 日历已存在: {title} @ {date_str}")
+        return
+
     for pid in summary_ids:
         try:
             resp = requests.patch(
@@ -2204,10 +2210,6 @@ def write_to_calendar(date_str: str, events: list[Event], dup_idx: set[int] | No
         except requests.RequestException as exc:
             print(f"[warn] 归档旧条目失败 {pid}: {exc}", file=sys.stderr)
 
-    title = f"{date_str} 黑客松活动汇总（{len(events)} 条）"
-    if (title, date_str) in existing_keys:
-        print(f"[skip] 日历已存在: {title} @ {date_str}")
-        return
     children = build_summary_children(date_str, events, dup_idx)
     first_batch = children[:90]
     rest = children[90:]
