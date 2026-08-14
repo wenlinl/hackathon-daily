@@ -49,14 +49,21 @@ ARCHIVE_PAGE_URL = os.environ.get(
 ARCHIVE_HTML = Path(__file__).resolve().parent.parent / "docs" / "archive.html"
 
 # AI 清洗/审核（OpenAI 兼容接口，可指向 DeepSeek 等）
-LLM_API_KEY = os.environ.get("LLM_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
-LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-_DEEPSEEK_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+
+
+def _env_str(name: str, default: str = "") -> str:
+    """读取环境变量，空字符串视为未设置（GitHub Actions 未配置的 secret 会是空串）。"""
+    return (os.environ.get(name, "") or "").strip() or default
+
+
+LLM_API_KEY = _env_str("LLM_API_KEY") or _env_str("OPENAI_API_KEY")
+LLM_BASE_URL = _env_str("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+LLM_MODEL = _env_str("LLM_MODEL", "gpt-4o-mini")
+_DEEPSEEK_KEY = _env_str("DEEPSEEK_API_KEY")
 if not LLM_API_KEY and _DEEPSEEK_KEY:
     LLM_API_KEY = _DEEPSEEK_KEY
     LLM_BASE_URL = "https://api.deepseek.com/v1"
-    LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-chat")
+    LLM_MODEL = _env_str("LLM_MODEL", "deepseek-chat")
 
 # 只展示今天起未来 N 天内的活动
 LOOKAHEAD_DAYS = 30
@@ -126,6 +133,15 @@ CITY_HINTS = [
     "重庆", "天津", "青岛", "大连", "郑州", "济南", "福州", "南昌",
     "桂林", "贵阳", "昆明", "兰州", "西宁", "乌鲁木齐", "呼伦贝尔",
     "Shenzhen", "Shanghai", "Beijing", "Hangzhou", "Chengdu",
+]
+
+# 国内主办方/平台关键词（用于国内/国外分组）
+DOMESTIC_ORG_HINTS = [
+    "腾讯", "阿里", "百度", "字节", "华为", "美团", "京东", "小米", "网易",
+    "蚂蚁", "飞桨", "paddlepaddle", "智谱", "讯飞", "小红书", "开源中国",
+    "oschina", "蓝桥", "天池", "datafountain", "segmentfault", "掘金",
+    "juejin", "活动行", "赛氪", "信通院", "联通", "移动", "电信", "科大",
+    "沐曦", "真格", "九合创投", "上海国资", "哈工大", "湖南农业大学",
 ]
 
 HEADERS = {
@@ -241,6 +257,7 @@ class Event:
     status: str = ""         # 活动状态（报名中/未开始/进行中/已结束）
     format: str = ""         # 形式（线上/线下/混合）
     tags: str = ""           # 标签
+    region: str = ""         # 分组：国内/国外/线上
     review_status: str = ""  # AI 审核状态
     review_note: str = ""    # 审核说明
     verify_status: str = ""  # 核对状态：已核对/部分核对/信息冲突/未能核对
@@ -261,6 +278,7 @@ class Event:
             ("🌐 形式", self.format),
             ("🏷️ 标签", self.tags),
             ("🚦 状态", self.status),
+            ("🌏 分组", self.region),
         ):
             if val:
                 parts.append(f"{label}：{val}")
@@ -1275,6 +1293,54 @@ def is_in_future_window(ev: Event, today: dt.date, days: int = LOOKAHEAD_DAYS) -
     return False
 
 
+def classify_region(ev: Event) -> str:
+    """按地点/举办方把活动分为 国内 / 国外 / 线上（AI 未给出 region 时的规则兜底）。"""
+    text = " ".join(
+        x
+        for x in (
+            ev.title or "",
+            ev.snippet or "",
+            ev.location or "",
+            ev.host or "",
+            ev.url or "",
+            ev.format or "",
+            ev.tags or "",
+        )
+        if x
+    )
+    low = text.lower()
+    # 线上 / 混合：以线上形式参与的一律归入"线上"
+    if ev.format in ("线上", "混合"):
+        return "线上"
+    online_terms = (
+        "线上",
+        "online",
+        "virtual",
+        "everywhere, worldwide",
+        "全球线上",
+        "async",
+    )
+    if any(t in low for t in online_terms):
+        return "线上"
+    # 国内：中文城市 / 国内主办方 / 国内平台来源 / 中文域名
+    if ev.location and any(c in ev.location for c in CITY_HINTS):
+        return "国内"
+    if any(c in text for c in CITY_HINTS):
+        return "国内"
+    if any(k in (ev.host or "").lower() for k in DOMESTIC_ORG_HINTS):
+        return "国内"
+    if any(k in low for k in DOMESTIC_ORG_HINTS):
+        return "国内"
+    if ev.source and any(k in ev.source for k in ("公众号", "小红书", "搜狗")):
+        return "国内"
+    if ".cn" in low or "weixin.sogou" in low or "xiaohongshu" in low:
+        return "国内"
+    return "国外"
+
+
+REGION_ORDER = {"国内": 0, "国外": 1, "线上": 2}
+
+
 def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
     """用 LLM（OpenAI 兼容接口，可接 DeepSeek）对每条信息做清洗与审核。
 
@@ -1307,7 +1373,9 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
         "只输出 JSON，格式：{\"items\":[{\"index\":0,\"keep\":true,\"needs_review\":false,"
         "\"cleaned_title\":\"\",\"host\":\"\",\"themes\":\"\",\"prize\":\"\",\"eligibility\":\"\","
         "\"signup_start\":\"\",\"signup_deadline\":\"\",\"competition_time\":\"\","
-        "\"location\":\"\",\"format\":\"\",\"status\":\"\",\"tags\":\"\",\"reason\":\"\"}]}"
+        "\"location\":\"\",\"format\":\"\",\"status\":\"\",\"tags\":\"\","
+        "\"region\":\"国内或国外或线上\",\"reason\":\"\"}]}"
+        " region 字段：按举办方/地点判断，线上活动填\"线上\"，国内主办方或国内城市填\"国内\"，其余填\"国外\"。"
     )
     items = [
         {
@@ -1402,6 +1470,7 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
                 ("format", "format"),
                 ("status", "status"),
                 ("tags", "tags"),
+                ("region", "region"),
             ):
                 val = (v.get(key) or "").strip()
                 if val:
@@ -1543,8 +1612,9 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
         "只输出 JSON：{\"items\":[{\"index\":0,\"official_url\":\"\","
         "\"fields\":{\"signup_start\":\"\",\"signup_deadline\":\"\",\"competition_time\":\"\","
         "\"location\":\"\",\"host\":\"\",\"prize\":\"\",\"eligibility\":\"\",\"format\":\"\","
-        "\"status\":\"\"},\"confidence\":\"high\",\"conflict\":false,"
+        "\"status\":\"\",\"region\":\"国内或国外或线上\"},\"confidence\":\"high\",\"conflict\":false,"
         "\"note\":\"一句话中文说明\"}]}"
+        " region 字段：线上活动填\"线上\"，国内主办方或国内城市填\"国内\"，其余填\"国外\"。"
     )
 
     verified = partial = failed = 0
@@ -1567,6 +1637,7 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
                         "eligibility": ev.eligibility,
                         "format": ev.format,
                         "status": ev.status,
+                        "region": ev.region,
                     },
                     "candidates": candidates.get(idx, []),
                 }
@@ -1601,6 +1672,7 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
                 ("eligibility", "eligibility"),
                 ("format", "format"),
                 ("status", "status"),
+                ("region", "region"),
             ):
                 val = (fields.get(key) or "").strip()
                 if val:
@@ -1705,6 +1777,14 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
     children: list[dict] = []
     dup_count = len(dup_idx)
     archive_ids = _archive_id_map()
+    region_counts: dict[str, int] = {}
+    for ev in events:
+        region_counts[ev.region or "国内"] = region_counts.get(ev.region or "国内", 0) + 1
+    region_text = ""
+    if region_counts:
+        region_text = " 分组：" + " / ".join(
+            f"{k} {region_counts.get(k, 0)} 条" for k in ("国内", "国外", "线上") if region_counts.get(k)
+        ) + "。"
     review_counts: dict[str, int] = {}
     for ev in events:
         if ev.review_status:
@@ -1725,56 +1805,65 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
             f"**概览**：共收录 {len(events)} 条活动，覆盖 {date_str} 起未来 30 天内的黑客松/编程马拉松信息。"
             + (f"其中 {dup_count} 条与历史已收录信息重合（已标注）。" if dup_count else "")
             + review_text
-            + verify_text,
+            + verify_text
+            + region_text,
         )
     )
     children.append(_text_block("heading_2", "活动总览"))
+    grouped: dict[str, list[tuple[int, Event]]] = {"国内": [], "国外": [], "线上": []}
     for i, ev in enumerate(events, 1):
-        title = f"{i}. {ev.title}"
-        if i - 1 in dup_idx:
-            title += " ⚠️已收录"
-        children.append(_text_block("heading_3", title))
-        # 字段列表：固定顺序 + 统一占位，保证标准格式
-        for label, val in (
-            ("🏢 主办方", ev.host),
-            ("📌 主题", ev.themes),
-            ("🏆 奖金", ev.prize),
-            ("👥 报名条件", ev.eligibility),
-            ("🌐 形式", ev.format),
-            ("🏷️ 标签", ev.tags),
-            ("🚦 状态", ev.status),
-        ):
-            if val:
-                children.append(_labeled_block("bulleted_list_item", label, val))
-        children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start or "待确认"))
-        children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline or "待确认"))
-        children.append(_labeled_block("bulleted_list_item", "⏰ 竞赛时间", ev.competition_time or "待确认"))
-        children.append(_labeled_block("bulleted_list_item", "📍 地点", ev.location or "待确认"))
-        children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180] if ev.snippet else "待确认"))
-        if ev.review_status:
-            review_line = ev.review_status
-            if ev.review_note:
-                review_line += f"：{ev.review_note}"
-            children.append(_labeled_block("bulleted_list_item", "🔎 审核", review_line))
-        if ev.verify_status:
-            verify_line = ev.verify_status
-            if ev.verify_note:
-                verify_line += f"：{ev.verify_note}"
-            children.append(_labeled_block("bulleted_list_item", "🔬 核对", verify_line))
-        if ev.official_url and ev.official_url != ev.url:
-            children.append(_link_block("bulleted_list_item", "✅ 官方链接", "查看详情", ev.official_url))
-        children.append(
-            _link_block(
-                "bulleted_list_item",
-                "🗄️ 信息库",
-                "打开对应记录",
-                _resolve_archive_url(ev.title, archive_ids),
+        grouped.setdefault(ev.region or "国内", []).append((i, ev))
+    for region_name in ("国内", "国外", "线上"):
+        items = grouped.get(region_name, [])
+        if not items:
+            continue
+        children.append(_text_block("heading_2", f"{region_name}活动（{len(items)} 条）"))
+        for i, ev in items:
+            title = f"{i}. {ev.title}"
+            if i - 1 in dup_idx:
+                title += " ⚠️已收录"
+            children.append(_text_block("heading_3", title))
+            # 字段列表：固定顺序 + 统一占位，保证标准格式
+            for label, val in (
+                ("🏢 主办方", ev.host),
+                ("📌 主题", ev.themes),
+                ("🏆 奖金", ev.prize),
+                ("👥 报名条件", ev.eligibility),
+                ("🌐 形式", ev.format),
+                ("🏷️ 标签", ev.tags),
+                ("🚦 状态", ev.status),
+            ):
+                if val:
+                    children.append(_labeled_block("bulleted_list_item", label, val))
+            children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start or "待确认"))
+            children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline or "待确认"))
+            children.append(_labeled_block("bulleted_list_item", "⏰ 竞赛时间", ev.competition_time or "待确认"))
+            children.append(_labeled_block("bulleted_list_item", "📍 地点", ev.location or "待确认"))
+            children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180] if ev.snippet else "待确认"))
+            if ev.review_status:
+                review_line = ev.review_status
+                if ev.review_note:
+                    review_line += f"：{ev.review_note}"
+                children.append(_labeled_block("bulleted_list_item", "🔎 审核", review_line))
+            if ev.verify_status:
+                verify_line = ev.verify_status
+                if ev.verify_note:
+                    verify_line += f"：{ev.verify_note}"
+                children.append(_labeled_block("bulleted_list_item", "🔬 核对", verify_line))
+            if ev.official_url and ev.official_url != ev.url:
+                children.append(_link_block("bulleted_list_item", "✅ 官方链接", "查看详情", ev.official_url))
+            children.append(
+                _link_block(
+                    "bulleted_list_item",
+                    "🗄️ 信息库",
+                    "打开对应记录",
+                    _resolve_archive_url(ev.title, archive_ids),
+                )
             )
-        )
-        if ev.url:
-            children.append(_link_block("bulleted_list_item", "🔗 链接", "查看详情", ev.url))
-        else:
-            children.append(_labeled_block("bulleted_list_item", "🔗 链接", "待确认"))
+            if ev.url:
+                children.append(_link_block("bulleted_list_item", "🔗 链接", "查看详情", ev.url))
+            else:
+                children.append(_labeled_block("bulleted_list_item", "🔗 链接", "待确认"))
     children.append(_text_block("heading_2", "说明"))
     children.append(
         _text_block(
@@ -1911,6 +2000,7 @@ def build_archive_html() -> None:
             ("形式", e.get("format")),
             ("标签", e.get("tags")),
             ("状态", e.get("status")),
+            ("分组", e.get("region")),
             ("来源", e.get("source")),
             ("核对", e.get("review_status")),
         ):
@@ -2033,6 +2123,7 @@ def write_to_archive(date_str: str, events: list[Event]) -> None:
             "format": ev.format,
             "tags": ev.tags,
             "status": ev.status,
+            "region": ev.region,
             "review_status": ev.review_status,
             "summary": (ev.snippet or "")[:500],
         }
@@ -2207,6 +2298,12 @@ def main() -> int:
         # 核对可能修正了时间字段，重新提取一次，保证日历日期准确
         for ev in unique:
             extract_fields(ev, today)
+
+    # 国内/国外/线上分组（AI 未给出时用规则兜底），并按分组顺序排列
+    for ev in unique:
+        if not ev.region:
+            ev.region = classify_region(ev)
+    unique.sort(key=lambda ev: (REGION_ORDER.get(ev.region, 3), 0))
 
     print(f"[info] 共收集 {len(unique)} 条活动（未来 {LOOKAHEAD_DAYS} 天内）")
     for ev in unique[:MAX_EVENTS]:
