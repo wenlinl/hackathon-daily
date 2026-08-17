@@ -116,6 +116,8 @@ WECHAT_ACCOUNTS = [
     "51CTO技术栈",
     "CSDN",
 ]
+# 单次运行最多尝试抓取几篇微信文章正文（搜狗反爬限制，抓不到就退回摘要）
+WECHAT_BODY_LIMIT = _env_int("WECHAT_BODY_LIMIT", 5)
 
 # 小红书（通过搜索引擎 site: 索引抓取公开帖子）
 XIAOHONGSHU_QUERIES = [
@@ -463,6 +465,60 @@ def search_xiaohongshu() -> list[Event]:
             events.append(ev)
         time.sleep(1)
     return events
+
+
+def fetch_wechat_article_body(sogou_link: str) -> dict | None:
+    """尽力抓取公众号文章正文（mp.weixin.qq.com 文章页，无需登录）。
+
+    搜狗对跳转链接有反爬（antispider/验证码），抓不到时返回 None，不影响主流程。
+    """
+    if "weixin.sogou.com/link" not in (sogou_link or ""):
+        return None
+    try:
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        resp = session.get(sogou_link, timeout=20, allow_redirects=True)
+        if "mp.weixin.qq.com" not in resp.url:
+            return None
+        soup = BeautifulSoup(resp.text, "lxml")
+        title_el = soup.select_one("#activity-name")
+        acct_el = soup.select_one("#js_name, #profileBt, .profile_nickname")
+        content_el = soup.select_one("#js_content")
+        if not content_el:
+            return None
+        body = content_el.get_text(" ", strip=True)
+        if len(body) < 30:
+            return None
+        return {
+            "title": title_el.get_text(" ", strip=True) if title_el else "",
+            "account": acct_el.get_text(" ", strip=True) if acct_el else "",
+            "body": body,
+        }
+    except requests.RequestException as exc:
+        print(f"[warn] 微信正文抓取失败: {exc}", file=sys.stderr)
+        return None
+
+
+def enrich_wechat_bodies(events: list[Event]) -> None:
+    """尝试给公众号来源的活动补上文章正文，正文会用于时间/地点/主办方等字段提取。"""
+    done = 0
+    for ev in events:
+        if done >= WECHAT_BODY_LIMIT:
+            break
+        if "weixin.sogou.com/link" not in (ev.url or ""):
+            continue
+        if not (ev.source or "").startswith("公众号"):
+            continue
+        info = fetch_wechat_article_body(ev.url)
+        if not info:
+            continue
+        done += 1
+        if info.get("account"):
+            ev.host = info["account"]
+        if info.get("body"):
+            ev.snippet = info["body"][:1200]
+        print(f"[info] 微信正文已获取：{ev.title[:30]}（{len(info['body'])} 字）")
+        time.sleep(1.5)
 
 
 def _fetch_json(url: str, timeout: int = 20, **kwargs) -> dict | list | None:
@@ -2544,6 +2600,8 @@ def main() -> int:
 
     events = search_all()
     events = [ev for ev in events if is_relevant(ev)]
+    # 尽力补抓微信公众号文章正文（被反爬拦截时自动跳过）
+    enrich_wechat_bodies(events)
     # 简单去重 + 排序（有发布日期/截止日期的靠前）
     unique: list[Event] = []
     seen: set[str] = set()
