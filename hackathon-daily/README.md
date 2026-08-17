@@ -5,12 +5,12 @@
 1. 通过公开网页搜索与结构化站点抓取，检索最近新发布或临近截止的黑客松/编程马拉松活动；
 2. **AI 清洗与审核**（可选，需配置 LLM Key）：逐条判断是否为真实黑客松、是否近期开始、报名是否还来得及，并提取主办方/主题/奖金/报名条件等字段；未配置 Key 时自动降级为规则清洗；
 3. **AI 重新检索核对**（可选）：对每条活动做定向搜索→抓取候选官方页→LLM 交叉核对，重点校正**报名时间/报名截止/竞赛时间**等字段，并标记核对状态（已核对/部分核对/信息冲突/未能核对）；
-4. 与服务器端历史信息库（`data/archive.json`）查重，重合条目标注"⚠️已收录"，新活动累积入库；
+4. 与 **Notion hackathons 数据库**（含服务器端 `data/archive.json` 镜像）查重，重合条目标注"⚠️已收录"；新活动写入/更新到该数据库（每条活动一条记录），`archive.json` 仅作镜像备份；
 5. 整理成摘要列表（活动名称、主办方、主题、奖金、报名条件、报名/截止/竞赛时间、地点、形式、状态、标签、来源链接、审核与核对状态），并**按 国内 / 国外 / 线上 分组**（线上活动优先归线上，其次按主办方/地点判断国内外）；
 6. 写入 Notion：直接在 **2026 数据库（日历视图）** 中创建当天的一条记录
    （标题：`YYYY-MM-DD 黑客松活动汇总（N 条）`，日期=当天），
    记录的正文包含全部活动详情（报名时间、报名截止、竞赛时间、地点、摘要、来源链接、审核状态）。
-7. **发送日报邮件**：把当天摘要通过 SMTP 发到指定邮箱（默认 `aresleng@sina.com`；未配置 SMTP 时跳过）。
+7. **发送日报邮件**：把当天摘要通过 SMTP 发到指定邮箱（默认 `aresleng@sina.com`；发件邮箱为 `lengwenlin@outlook.com`；未配置 SMTP 时跳过）。
 
 ## 信息核对标准（创建每条信息时核对）
 
@@ -58,25 +58,20 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 | `NOTION_TOKEN` | Notion Integration Token（`secret_...`） |
 | `DEEPSEEK_API_KEY`（或 `LLM_API_KEY`） | 可选：AI 清洗/审核用的 LLM API Key（DeepSeek/OpenAI 兼容） |
 | `LLM_BASE_URL` / `LLM_MODEL` | 可选：自定义模型地址与模型名（默认 DeepSeek） |
-| `SMTP_HOST` | 可选：SMTP 服务器（如 `smtp.qq.com` / `smtp.163.com`），配置后每天发送日报邮件 |
-| `SMTP_PORT` | 可选：默认 `465`（SSL）；填 `587` 用 STARTTLS |
-| `SMTP_USER` / `SMTP_PASSWORD` | 可选：发件邮箱账号与授权码（第三方客户端授权码） |
+| `SMTP_HOST` | 可选：SMTP 服务器（当前为 `smtp.office365.com`，Outlook），配置后每天发送日报邮件 |
+| `SMTP_PORT` | 可选：当前 `587`（STARTTLS） |
+| `SMTP_USER` / `SMTP_PASSWORD` | 可选：发件邮箱账号（`lengwenlin@outlook.com`）与密码/应用专用密码 |
 | `EMAIL_TO`（Variables） | 可选：收件人，默认 `aresleng@sina.com` |
 
 邮件正文取自 `data/daily_summary.md`（运行中生成，不入库），内容与日报一致：按国内/国外/线上分组，含时间、地点、链接与信息库跳转。
 
-## 服务器端历史信息库
+## 黑客松存档数据库（Notion）
 
-- 文件：`data/archive.json`（随仓库持久化，替代 Notion 数据库）
-- 用途：累积存储所有收录过的黑客松活动（按归一化标题去重），作为每日查重基准
-- 每次云端运行结束后，工作流会自动把更新后的 `archive.json` 提交回仓库
-- 可浏览页面：`docs/archive.html`（GitHub Pages 发布：<https://wenlinl.github.io/hackathon-daily/archive.html>），每条记录带锚点 `#entry-<id>`，支持搜索过滤
-
-## 日报 ↔ 信息库一一对应
-
-- 每条信息库记录有稳定锚点 ID：`sha1(归一化标题)[:12]`
-- 日报中每条活动都带 **"🗄️ 信息库 → 打开对应记录"** 链接，点击直接跳到信息库页面中该活动的锚点记录
-- 页面由 GitHub Actions 的 `deploy-pages` job 自动发布，每次运行后自动更新
+- 数据库：Notion **hackathons** 数据库（`3bb60e0b-0bbf-8179-aa88-d98a77a635ef`），每条活动一条记录
+- 属性：名称(title)、日期(date)、报名截止(date)、地点(rich_text)、来源链接(url)、摘要(rich_text)、状态(status)
+- 每次运行：已存在的活动**更新**记录（刷新时间/地点/链接/摘要/状态），新活动**新增**记录
+- 日报中每条活动带 **"🗄️ 信息库 → 打开对应记录"** 链接，直接跳到该活动在 Notion 数据库中的记录，实现一一对应
+- `data/archive.json` 保留为服务器端镜像（查重/备份），不再生成网站页面
 
 ## 本地试跑
 
