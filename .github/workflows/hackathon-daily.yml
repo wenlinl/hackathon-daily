@@ -49,6 +49,7 @@ jobs:
             echo "No archive changes"
           else
             git commit -m "chore(hackathon-daily): update server-side archive"
+            git pull --rebase origin main || true
             git push
           fi
 
