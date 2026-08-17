@@ -4,16 +4,26 @@
 把公众号文章转发给企业微信里的自建应用联系人后，微信会推送 link 消息；
 这里接收回调 → 调用 ingest 引擎 → 分析并写入 Notion。
 
-运行：
-    WECOM_TOKEN=xxx WECOM_AES_KEY=xxx WECOM_CORP_ID=xxx python wecom_receiver.py
-    （默认 0.0.0.0:8000，配公网隧道 cloudflared/ngrok 后填进企业微信“接收消息服务器URL”）
+企微回调要求 5 秒内响应，因此收到消息后立即回 "success"，AI 分析与写
+Notion 放到后台线程执行；同一消息重复推送时按 URL/内容去重。
+
+本地运行：
+    WECOM_CORP_ID=xxx WECOM_TOKEN=xxx WECOM_AES_KEY=xxx \
+    NOTION_TOKEN=xxx DEEPSEEK_API_KEY=xxx python src/wecom_receiver.py
+    （默认 0.0.0.0:8000，配公网隧道 cloudflared/ngrok 后填进企微后台）
+
+生产运行（云端）：
+    gunicorn -w 1 -b 0.0.0.0:8000 --timeout 60 wecom_receiver:app
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
+import threading
 from pathlib import Path
+from typing import Any
 
 from flask import Flask, request
 from wechatpy.enterprise import parse_message
@@ -29,9 +39,48 @@ TOKEN = os.environ.get("WECOM_TOKEN", "")
 AES_KEY = os.environ.get("WECOM_AES_KEY", "")
 CORP_ID = os.environ.get("WECOM_CORP_ID", "")
 
+# 回调必须 5 秒内响应，AI 分析+写 Notion 较慢 → 后台线程处理；
+# 企微失败会重试推送，同一消息去重避免重复入库。
+_seen: set[str] = set()
+_seen_lock = threading.Lock()
+_SEEN_MAX = 500
+
 
 def _crypto() -> WeChatCrypto:
     return WeChatCrypto(TOKEN, AES_KEY, CORP_ID)
+
+
+def _dedup(key: str) -> bool:
+    """返回 True 表示已处理过，应跳过本次推送。"""
+    global _seen
+    with _seen_lock:
+        if key in _seen:
+            return True
+        _seen.add(key)
+        if len(_seen) > _SEEN_MAX:
+            _seen = set(list(_seen)[-_SEEN_MAX // 2 :])
+        return False
+
+
+def _handle(message: Any) -> None:
+    try:
+        if message.type == "link":
+            ingest.ingest(
+                title=getattr(message, "title", ""),
+                link=getattr(message, "url", ""),
+                desc=getattr(message, "description", ""),
+            )
+        elif message.type == "text":
+            ingest.ingest(text=getattr(message, "content", ""))
+        else:
+            print(f"[info] 忽略非文章消息类型: {message.type}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] 后台处理失败: {exc}", file=sys.stderr)
+
+
+@app.route("/health")
+def health() -> str:
+    return "ok"
 
 
 @app.route("/wecom", methods=["GET", "POST"])
@@ -55,16 +104,13 @@ def wecom() -> tuple[str, int] | str:
         print(f"[error] 回调解析失败: {exc}", file=sys.stderr)
         return "error", 400
 
-    if message.type == "link":
-        ingest.ingest(
-            title=getattr(message, "title", ""),
-            link=getattr(message, "url", ""),
-            desc=getattr(message, "description", ""),
-        )
-    elif message.type == "text":
-        ingest.ingest(text=getattr(message, "content", ""))
-    else:
-        print(f"[info] 忽略非文章消息类型: {message.type}")
+    key = getattr(message, "url", "") or hashlib.sha256(
+        getattr(message, "content", "").encode("utf-8", "ignore")
+    ).hexdigest()
+    if _dedup(key):
+        print("[info] 重复推送，跳过")
+        return "success"
+    threading.Thread(target=_handle, args=(message,), daemon=True).start()
     return "success"
 
 

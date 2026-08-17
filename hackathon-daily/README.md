@@ -99,19 +99,60 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 个人微信没有官方 API，但**企业微信官方回调**可以实现"转发即收录"：
 
 1. 注册企业微信（免费），创建**自建应用**，拿到 `corpId` / `Secret` / `AgentId`；
-2. 在自建应用里配置**接收消息服务器**：URL 填你的公网地址（如 `https://你的域名/wecom`），并生成 `Token` 和 `EncodingAESKey`；
-3. 把自建应用通过**微信插件**加到你的微信联系人，置顶；
-4. 以后在公众号看到有用黑客松，直接**转发给该联系人**；
-5. 接收端收到 link 消息 → `src/ingest.py` 用 AI 提取字段 → 写入 Notion 黑客松数据库 + 当天日报。
+2. 把接收端部署到公网（见下），拿到形如 `https://xxx/wecom` 的真实地址；
+3. 在自建应用里配置**接收消息服务器**：URL 填该地址，并生成 `Token` 和 `EncodingAESKey`（保存时企微会发验证请求，必须能正常回显才通过）；
+4. 把自建应用通过**微信插件**加到你的微信联系人，置顶；
+5. 以后在公众号看到有用黑客松，直接**转发给该联系人**；
+6. 接收端收到 link 消息 → `src/ingest.py` 用 AI 提取字段 → 写入 Notion 黑客松数据库 + 当天日报。
 
-本地运行接收端：
+> ⚠️ 回调 URL 必须指向**你自己的、正在运行接收端的公网服务**，不能填一个没有服务的域名。
+> 企微保存时会对 URL 发 GET 验证（带 `echostr`），接收端解密回显后才算通过；
+> 提示"openapi回调地址请求不通过"通常就是"地址指向的服务不在线/不对"。
+
+### 云端部署（推荐，电脑关机也能跑）
+
+**方式一：Render（免费，最快）**
+
+1. 把仓库推到 GitHub（本仓库已带 `Dockerfile` 和 `render.yaml`）；
+2. 注册 [render.com](https://render.com)，New + → Blueprint，选本仓库；
+3. 服务起来后，把面板里 `NOTION_TOKEN`、`DEEPSEEK_API_KEY` 两个环境变量填上（与 GitHub Actions 里同一批值）；
+4. 得到形如 `https://hackathon-daily-wecom.onrender.com/wecom` 的地址，填进企微后台。
+
+免费档闲置会休眠，首次回调有冷启动延迟；企微会重试，个人使用一般能成功。
+
+**方式二：自己的服务器/VPS**
+
+```bash
+docker build -t hackathon-daily-wecom hackathon-daily/
+docker run -d --name wecom -p 8000:8000 \
+  -e WECOM_CORP_ID=... -e WECOM_TOKEN=... -e WECOM_AES_KEY=... \
+  -e NOTION_TOKEN=... -e DEEPSEEK_API_KEY=... \
+  hackathon-daily-wecom
+```
+
+再把你的域名（如 `dianji.com`）解析到该服务器，URL 填 `https://dianji.com/wecom`。
+
+### 本地临时验证（电脑开着时）
 
 ```bash
 python -m pip install -r requirements.txt
-WECOM_TOKEN=xxx WECOM_AES_KEY=xxx WECOM_CORP_ID=xxx python src/wecom_receiver.py
+WECOM_CORP_ID=... WECOM_TOKEN=... WECOM_AES_KEY=... \
+NOTION_TOKEN=... DEEPSEEK_API_KEY=... python src/wecom_receiver.py
+# 另开终端，启动临时隧道拿到公网地址：
+cloudflared tunnel --url http://localhost:8000
 ```
 
-再用 cloudflared / ngrok 把 8000 端口暴露成 HTTPS，填到企业微信后台即可。也可以单独调用引擎：
+把 cloudflared 输出的 `https://xxx.trycloudflare.com/wecom` 填进企微后台保存；
+验证通过后可先测试转发，确认整条链路正常，再部署到云端。
+
+> ⚠️ 注册时**必须选"企业"形态**，不要选"个人组建团队"。团队形态没有管理后台，
+> 无法创建自建应用、也无法开微信客服（登录 work.weixin.qq.com 会提示"团队用户"）。
+> 个人免费注册未认证企业即可：手机企业微信 → 创建/加入企业 → 类型选"企业"，名称随意，
+> 通讯录 100 人上限足够自用；创建后再登录管理后台 → 应用管理 → 创建自建应用。
+> 注意：自建应用不支持从个人微信直接转发公众号文章，需要在企业微信内把链接粘贴/转发给应用；
+> 想要"个人微信直接转发"体验，用**微信客服**方案（需把接收端改成客服回调格式）。
+
+也可以单独调用引擎：
 
 ```bash
 python src/ingest.py --title "标题" --link "https://mp.weixin.qq.com/s/..." --desc "摘要"
