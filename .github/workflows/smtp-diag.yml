@@ -1,0 +1,40 @@
+name: smtp-diag
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check SMTP connectivity
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        run: |
+          python3 - <<'PY'
+          import os, smtplib, socket
+          host = os.environ.get("SMTP_HOST", "")
+          port = int((os.environ.get("SMTP_PORT") or "465").strip() or 465)
+          print("host set:", bool(host), "| port:", port)
+          if not host:
+              raise SystemExit("SMTP_HOST 未配置")
+          try:
+              with socket.create_connection((host, port), timeout=15) as s:
+                  print("tcp connect: OK")
+          except Exception as e:
+              print("tcp connect FAIL:", type(e).__name__, e)
+              raise SystemExit(1)
+          try:
+              with smtplib.SMTP_SSL(host, port, timeout=15) as s:
+                  code, msg = s.ehlo()
+                  print("ehlo:", code, str(msg)[:160])
+          except Exception as e:
+              print("smtp_ssl FAIL:", type(e).__name__, e)
+          try:
+              with smtplib.SMTP(host, port, timeout=15) as s:
+                  code, msg = s.ehlo()
+                  print("plain ehlo:", code, str(msg)[:160])
+          except Exception as e:
+              print("smtp_plain FAIL:", type(e).__name__, e)
+          PY
