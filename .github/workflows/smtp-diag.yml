@@ -38,3 +38,23 @@ jobs:
           except Exception as e:
               print("smtp_plain FAIL:", type(e).__name__, e)
           PY
+      - name: Probe common SMTP hosts
+        run: |
+          python3 - <<'PY'
+          import socket
+          hosts = [
+              ("smtp.qq.com", 465), ("smtp.qq.com", 587),
+              ("smtp.163.com", 465), ("smtp.163.com", 587),
+              ("smtp.sina.com.cn", 465), ("smtp.sina.com.cn", 587),
+              ("smtp.126.com", 465),
+              ("smtp.gmail.com", 465), ("smtp.gmail.com", 587),
+              ("smtp.office365.com", 587),
+              ("smtp.mxhichina.com", 465),
+          ]
+          for host, port in hosts:
+              try:
+                  with socket.create_connection((host, port), timeout=8):
+                      print(f"OK   {host}:{port}")
+              except Exception as e:
+                  print(f"FAIL {host}:{port}  {type(e).__name__}: {e}")
+          PY
