@@ -98,6 +98,10 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 
 个人微信没有官方 API，但**企业微信官方回调**可以实现"转发即收录"：
 
+> 🚦 **当前模式：只分析微信转发**。每天 09:00 的自动抓取已停用
+> （GitHub Actions 去掉了 schedule，collect 步骤由 `ENABLE_DAILY_SCRAPE=true` 控制），
+> 数据源只有你转发到微信客服/自建应用的链接或正文。
+
 1. 注册企业微信（免费），创建**自建应用**，拿到 `corpId` / `Secret` / `AgentId`；
 2. 把接收端部署到公网（见下），拿到形如 `https://xxx/wecom` 的真实地址；
 3. 在自建应用里配置**接收消息服务器**：URL 填该地址，并生成 `Token` 和 `EncodingAESKey`（保存时企微会发验证请求，必须能正常回显才通过）；

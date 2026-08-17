@@ -1,9 +1,8 @@
 name: hackathon-daily
 
 on:
-  schedule:
-    # 北京时间每天 09:00 = UTC 01:00
-    - cron: "0 1 * * *"
+  # 已切换为"只分析微信转发"模式：不再定时抓取。
+  # 如需恢复自动抓取：加回 schedule，并在仓库 Variables 里设 ENABLE_DAILY_SCRAPE=true
   workflow_dispatch:
 
 permissions:
@@ -26,6 +25,7 @@ jobs:
           python -m pip install -r hackathon-daily/requirements.txt
 
       - name: Run daily hackathon collection
+        if: ${{ vars.ENABLE_DAILY_SCRAPE == 'true' }}
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
@@ -54,7 +54,7 @@ jobs:
           fi
 
       - name: Send daily email
-        if: always()
+        if: ${{ vars.ENABLE_DAILY_SCRAPE == 'true' }}
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
