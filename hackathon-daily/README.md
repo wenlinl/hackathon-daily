@@ -75,6 +75,22 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 - 日报中每条活动带 **"🗄️ 信息库 → 打开对应记录"** 链接，直接跳到该活动在 Notion 数据库中的记录，实现一一对应
 - `data/archive.json` 保留为服务器端镜像（查重/备份），不再生成网站页面
 
+## 手动补充微信文章全文
+
+微信正文无法稳定自动抓取时，可以把文章**标题 + 正文全文 + 链接**直接发给助手，助手会写入 `hackathon-daily/manual/articles.json`；下次运行自动并入当天日报和信息库，AI 会从中提取截止时间/地点/主办方等字段。也可以自己按此格式追加：
+
+```json
+{
+  "title": "活动名称",
+  "url": "https://mp.weixin.qq.com/s/...",
+  "account": "公众号名称",
+  "text": "文章正文全文……",
+  "processed": false
+}
+```
+
+已并入当天流程的条目会被标记 `processed: true`，不会重复入库。
+
 ## 本地试跑
 
 ```bash

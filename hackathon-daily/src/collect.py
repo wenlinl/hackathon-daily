@@ -43,6 +43,8 @@ DB_HACKATHON_ID = "3bb60e0b0bbf8179aa88d98a77a635ef"      # Notion "hackathons" 
 
 # 服务器端历史信息库（本地 JSON 文件，随仓库持久化，替代 Notion 数据库）
 ARCHIVE_FILE = Path(__file__).resolve().parent.parent / "data" / "archive.json"
+# 手动补充的文章（微信全文等，用户/助手贴入，下次运行自动并入）
+MANUAL_ARTICLES_FILE = Path(__file__).resolve().parent.parent / "manual" / "articles.json"
 # 信息库可浏览页面（GitHub Pages，/docs 目录），每条目带锚点供日报跳转
 ARCHIVE_PAGE_URL = os.environ.get(
     "ARCHIVE_PAGE_URL", "https://wenlinl.github.io/hackathon-daily/archive.html"
@@ -519,6 +521,56 @@ def enrich_wechat_bodies(events: list[Event]) -> None:
             ev.snippet = info["body"][:1200]
         print(f"[info] 微信正文已获取：{ev.title[:30]}（{len(info['body'])} 字）")
         time.sleep(1.5)
+
+
+def load_manual_articles() -> list[Event]:
+    """读取手动补充的文章（如微信全文），转成待入库活动。"""
+    events: list[Event] = []
+    if not MANUAL_ARTICLES_FILE.exists():
+        return events
+    try:
+        data = json.loads(MANUAL_ARTICLES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"[warn] 读取手动补充文章失败: {exc}", file=sys.stderr)
+        return events
+    for it in data or []:
+        if it.get("processed"):
+            continue
+        title = (it.get("title") or "").strip()
+        text = (it.get("text") or "").strip()
+        if not title or len(text) < 30:
+            continue
+        events.append(
+            Event(
+                title=title,
+                url=(it.get("url") or "").strip(),
+                snippet=text[:1200],
+                host=(it.get("account") or "").strip(),
+                source="手动补充-微信文章",
+            )
+        )
+    return events
+
+
+def mark_manual_processed(events: list[Event]) -> None:
+    """把已成功并入当天流程的手动文章标记为已处理。"""
+    if not MANUAL_ARTICLES_FILE.exists():
+        return
+    try:
+        data = json.loads(MANUAL_ARTICLES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    keys = {normalize_title(ev.title) for ev in events}
+    changed = False
+    for it in data or []:
+        if not it.get("processed") and normalize_title(it.get("title")) in keys:
+            it["processed"] = True
+            changed = True
+    if changed:
+        tmp = MANUAL_ARTICLES_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, MANUAL_ARTICLES_FILE)
+        print("[info] 手动补充文章已标记处理")
 
 
 def _fetch_json(url: str, timeout: int = 20, **kwargs) -> dict | list | None:
@@ -1630,15 +1682,19 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
         urls: list[str] = []
         try:
             queries = [f"{ev.title} 报名 截止", f"{ev.title} hackathon registration"]
+            if ev.snippet:
+                # 用摘要关键词做二次搜索，找官网/报名页（微信正文拿不到时的替代路径）
+                snippet_kw = re.sub(r"\s+", " ", ev.snippet)[:80]
+                queries.append(snippet_kw)
             for qi, q in enumerate(queries):
+                if urls and qi > 0:
+                    break
                 found = search_bing(q)
                 if not found:
                     found = search_duckduckgo(q)
                 for r in found[:3]:
                     if r.url and r.url not in urls:
                         urls.append(r.url)
-                if urls and qi == 0:
-                    break  # 第一个查询已有结果就不再跑第二个，节省请求
                 time.sleep(0.4)
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] 核对搜索失败 {ev.title[:30]}: {exc}", file=sys.stderr)
@@ -2599,6 +2655,10 @@ def main() -> int:
     print(f"[info] 日期: {date_str}，开始搜索…")
 
     events = search_all()
+    manual_events = load_manual_articles()
+    if manual_events:
+        print(f"[info] 手动补充文章 {len(manual_events)} 篇，优先并入")
+    events = manual_events + events
     events = [ev for ev in events if is_relevant(ev)]
     # 尽力补抓微信公众号文章正文（被反爬拦截时自动跳过）
     enrich_wechat_bodies(events)
@@ -2691,6 +2751,7 @@ def main() -> int:
     write_to_archive(date_str, selected)
     write_to_calendar(date_str, selected, dup_idx)
     write_daily_summary(date_str, selected, dup_idx)
+    mark_manual_processed(selected)
     print("[done] 全部完成")
     return 0
 
