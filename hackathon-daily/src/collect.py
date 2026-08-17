@@ -2070,6 +2070,71 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
     return urls
 
 
+def _archive_row(page_id: str) -> None:
+    """归档（软删除）一条 Notion 记录。"""
+    try:
+        resp = requests.patch(
+            f"{NOTION_API}/pages/{page_id}",
+            headers=notion_headers(),
+            json={"archived": True},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            print(f"[warn] 归档失败 {resp.status_code}: {resp.text[:200]}", file=sys.stderr)
+    except requests.RequestException as exc:
+        print(f"[warn] 归档失败: {exc}", file=sys.stderr)
+
+
+def cleanup_archive(today: dt.date) -> int:
+    """按日报同标准清理黑客松库：删除非黑客松 / 过期超窗 / 纯海外 / 无关条目。"""
+    try:
+        rows = query_database_rows(DB_HACKATHON_ID)
+    except RuntimeError as exc:
+        print(f"[warn] 清理失败: {exc}", file=sys.stderr)
+        return 0
+    removed = 0
+    pruned: list[str] = []
+    window_end = today + dt.timedelta(days=LOOKAHEAD_DAYS)
+    for row in rows:
+        props = row.get("properties", {})
+        title = "".join(t.get("plain_text", "") for t in props.get("名称", {}).get("title", [])).strip()
+        if not title:
+            continue
+        snippet = "".join(t.get("plain_text", "") for t in props.get("摘要", {}).get("rich_text", []))
+        ev = Event(title=title, snippet=snippet, location="")
+        text = f"{title} {snippet}"
+        # 1) 与日报一致：必须是黑客松关键词命中且无排除特征（课程广告/回顾/招聘等）
+        if not is_relevant(ev):
+            _archive_row(row["id"])
+            pruned.append(normalize_title(title))
+            removed += 1
+            time.sleep(0.15)
+            continue
+        # 2) 纯海外（分组=国外）
+        if re.search(r"分组[：:]\s*国外", text):
+            _archive_row(row["id"])
+            pruned.append(normalize_title(title))
+            removed += 1
+            time.sleep(0.15)
+            continue
+        # 3) 过期/超窗：有明确日期但全部不在今天起未来 30 天内
+        dates = extract_dates(text, today.year)
+        if dates and not any(today <= d <= window_end for d in dates):
+            _archive_row(row["id"])
+            pruned.append(normalize_title(title))
+            removed += 1
+            time.sleep(0.15)
+    if pruned:
+        data = _load_archive()
+        entries = data.get("entries", {})
+        for key in pruned:
+            entries.pop(key, None)
+        data["entries"] = entries
+        data["updated"] = today.isoformat()
+        _save_archive(data)
+    return removed
+
+
 def _text_block(block_type: str, text: str) -> dict:
     return {
         "object": "block",
@@ -2778,6 +2843,9 @@ def main() -> int:
     for ev in selected:
         ev.archive_url = notion_urls.get(normalize_title(ev.title), "")
     write_to_archive(date_str, selected)
+    # 黑客松库与日报同标准清理：非黑客松/过期/纯海外直接归档
+    removed = cleanup_archive(today)
+    print(f"[info] 黑客松库清理：删除 {removed} 条（按日报同标准）")
     write_to_calendar(date_str, selected, dup_idx)
     write_daily_summary(date_str, selected, dup_idx)
     mark_manual_processed(selected)
