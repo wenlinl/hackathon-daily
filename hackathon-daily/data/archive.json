@@ -3182,6 +3182,44 @@
       "region": "国内",
       "review_status": "AI 审核通过",
       "summary": "InfoQ 协办的Huawei LiteOS 黑客松 大赛吧.叫上你的小伙伴,来一场2天1夜的疯狂. 为什么要做这样一场 黑客松 ? 自从作为华为“1+2..."
+    },
+    "huaweiliteos黑客松招募": {
+      "title": "Huawei LiteOS 黑客松招募",
+      "first_seen": "2026-08-17",
+      "url": "https://weixin.sogou.com/link?url=dn9a_-gY295K0Rci_xozVXfdMkSQTLW6ft3wfAVofsP5Peu-UiA4DOYCqUtHp7CM_fN34EI9kwGVgrFeYQugDm1Bnrm3-TcRwd5p6HA5LJWk662_7GQdYXIyB764xVCmLEnm2PqShJTaPdEWq4pdVgHLm0rR1i6K5-rqCaNXecAybZSCX7jPGgGPr1F1LAJ80mQd2GdhWBT1-U9Ykrb2bdU2bvAFYowMjnc3XUbkWVH0FE-JMxYrrnt-4MIXUMvdgAfplFP6jbiAFeN0MobplVrj2tXASoJECcX5_NuiUdgaQfHk4Sa3DccWO74FztpkiZqwg0yoRFw.&type=2&query=InfoQ %E9%BB%91%E5%AE%A2%E6%9D%BE&token=57ACB941B2E21C2034326D089798F13B348C7E4B6A82E270",
+      "source": "公众号(InfoQ)",
+      "location": "",
+      "deadline": "",
+      "competition_time": "2天1夜",
+      "host": "华为",
+      "themes": "智能物联网",
+      "prize": "",
+      "eligibility": "",
+      "format": "",
+      "tags": "物联网, 黑客松",
+      "status": "招募中",
+      "region": "国内",
+      "review_status": "AI 审核通过",
+      "summary": "InfoQ 协办的Huawei LiteOS 黑客松 大赛吧.叫上你的小伙伴,来一场2天1夜的疯狂. 为什么要做这样一场 黑客松 ? 自从作为华为“1+2..."
+    },
+    "华为黑客松": {
+      "title": "华为黑客松",
+      "first_seen": "2026-08-17",
+      "url": "https://weixin.sogou.com/link?url=dn9a_-gY295K0Rci_xozVXfdMkSQTLW6cwJThYulHEtVjXrGTiVgS7Zn45gw4TDHbw4L_yVOIH88mR84WQtkzlqXa8Fplpd9b0wFzcLua-5myJy7qFH51WGeEVhrxGX7fcRN8jAaKefogcntMD9BlXsmVpnE5xPxSbwzg1GLgZsebkw6B5_T9idmAuJxCxt6gYQ2TgI-0JNmEhXnW6CS75wRUcvW_NMvFUK0pZkPI0Q8CJgNxEKkyK28tnXUMmPyskyHjxwWqyOfxjh3za6jWA..&type=2&query=%E5%8D%8E%E4%B8%BA%E4%BA%91 %E9%BB%91%E5%AE%A2%E6%9D%BE&token=57ABEED25C0BF5C9DDDA84E67D709C65DD1FFB036A82E24E",
+      "source": "公众号(华为云)",
+      "location": "",
+      "deadline": "",
+      "competition_time": "",
+      "host": "华为",
+      "themes": "量子计算",
+      "prize": "",
+      "eligibility": "",
+      "format": "线上",
+      "tags": "",
+      "status": "",
+      "region": "线上",
+      "review_status": "AI 审核通过",
+      "summary": "本次量子计算 黑客松 活动将会在线上组织,要求选手在一定时间内... 【报名方式】通过 华为云 比赛平台进行报名.需要提交学院、姓名..."
     }
   }
 }
