@@ -68,6 +68,11 @@ if not LLM_API_KEY and _DEEPSEEK_KEY:
     LLM_BASE_URL = "https://api.deepseek.com/v1"
     LLM_MODEL = _env_str("LLM_MODEL", "deepseek-chat")
 
+# 第二个 AI（核对阶段使用，可配不同模型/服务商；未配置则沿用主 AI）
+VERIFY_LLM_API_KEY = _env_str("VERIFY_LLM_API_KEY") or LLM_API_KEY
+VERIFY_LLM_BASE_URL = _env_str("VERIFY_LLM_BASE_URL") or LLM_BASE_URL
+VERIFY_LLM_MODEL = _env_str("VERIFY_LLM_MODEL") or LLM_MODEL
+
 # 只展示今天起未来 N 天内的活动
 LOOKAHEAD_DAYS = 30
 # 单日汇总最多展示/入库的活动条数
@@ -1591,10 +1596,20 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
     return mode, passed, needs_review, dropped
 
 
-def _llm_completion(system_prompt: str, user_content: str, timeout: int = 90) -> dict | None:
+def _llm_completion(
+    system_prompt: str,
+    user_content: str,
+    timeout: int = 90,
+    api_key: str = "",
+    base_url: str = "",
+    model: str = "",
+) -> dict | None:
     """调用 OpenAI 兼容 LLM（DeepSeek 等），返回解析后的 JSON dict。"""
+    api_key = api_key or LLM_API_KEY
+    base_url = (base_url or LLM_BASE_URL).rstrip("/")
+    model = model or LLM_MODEL
     payload = {
-        "model": LLM_MODEL,
+        "model": model,
         "temperature": 0.2,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -1603,15 +1618,15 @@ def _llm_completion(system_prompt: str, user_content: str, timeout: int = 90) ->
     }
     try:
         resp = requests.post(
-            f"{LLM_BASE_URL}/chat/completions",
-            headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             json={**payload, "response_format": {"type": "json_object"}},
             timeout=timeout,
         )
         if resp.status_code not in (200, 201):
             resp = requests.post(
-                f"{LLM_BASE_URL}/chat/completions",
-                headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=payload,
                 timeout=timeout,
             )
@@ -1662,10 +1677,11 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
 
     返回 (已核对, 部分核对, 未能核对)。未配置 AI Key 时整体标记未核对。
     """
-    if not LLM_API_KEY:
+    if not VERIFY_LLM_API_KEY:
         for ev in events:
             ev.verify_status = "未核对（未配置 AI）"
         return 0, 0, len(events)
+    print(f"[info] 核对使用第二 AI：{VERIFY_LLM_MODEL}（{VERIFY_LLM_BASE_URL}）")
 
     # 优先核对缺少报名截止时间的活动（用户最关心截止日期）
     def _deadline_priority(ev: Event) -> int:
@@ -1762,7 +1778,12 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
                 }
             )
         result = _llm_completion(
-            verify_prompt, json.dumps(batch, ensure_ascii=False), timeout=120
+            verify_prompt,
+            json.dumps(batch, ensure_ascii=False),
+            timeout=120,
+            api_key=VERIFY_LLM_API_KEY,
+            base_url=VERIFY_LLM_BASE_URL,
+            model=VERIFY_LLM_MODEL,
         )
         if not result:
             for ev in targets[start : start + 10]:
@@ -2676,6 +2697,12 @@ def main() -> int:
     for ev in unique:
         extract_fields(ev, today)
 
+    # 预过滤：规则判定的"纯海外"（国外线下）活动先剔除，不浪费后续 AI 核对
+    for ev in unique:
+        if not ev.region:
+            ev.region = classify_region(ev)
+    unique = [ev for ev in unique if ev.region != "国外"]
+
     # AI 清洗与审核：真实黑客松？近期开始？报名还来得及？（未配置 Key 时自动降级）
     if not args.no_ai:
         mode, passed, needs_review, dropped = ai_clean_and_review(unique)
@@ -2711,6 +2738,8 @@ def main() -> int:
     for ev in unique:
         if not ev.region:
             ev.region = classify_region(ev)
+    # 剔除纯海外（国外线下）活动：只保留国内与线上
+    unique = [ev for ev in unique if ev.region != "国外"]
     unique.sort(key=lambda ev: (REGION_ORDER.get(ev.region, 3), 0))
 
     # 按 国内/国外/线上 分组比例均衡选取，避免某组被上限截断

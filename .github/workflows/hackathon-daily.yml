@@ -32,6 +32,9 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
           LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          VERIFY_LLM_API_KEY: ${{ secrets.VERIFY_LLM_API_KEY }}
+          VERIFY_LLM_BASE_URL: ${{ secrets.VERIFY_LLM_BASE_URL }}
+          VERIFY_LLM_MODEL: ${{ secrets.VERIFY_LLM_MODEL }}
           VERIFY_MAX_EVENTS: ${{ vars.VERIFY_MAX_EVENTS }}
         run: python hackathon-daily/src/collect.py
 
