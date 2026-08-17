@@ -70,7 +70,7 @@ if not LLM_API_KEY and _DEEPSEEK_KEY:
 LOOKAHEAD_DAYS = 30
 # 单日汇总最多展示/入库的活动条数
 MAX_EVENTS = 50
-# 单日最多做 AI 重新检索核对的活动条数（控制耗时与费用）
+# 单日最多做 AI 重新检索核对的活动条数（默认全部核对；可用 VERIFY_MAX_EVENTS 限制）
 
 
 def _env_int(name: str, default: int) -> int:
@@ -81,7 +81,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-VERIFY_MAX_EVENTS = _env_int("VERIFY_MAX_EVENTS", 20)
+VERIFY_MAX_EVENTS = _env_int("VERIFY_MAX_EVENTS", 100000)
 
 # ---------------------------------------------------------------------------
 # 信息核对标准（创建每条信息时按此核对）
@@ -1573,21 +1573,21 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
     def gather(idx: int, ev: Event) -> None:
         urls: list[str] = []
         try:
-            for q in (f"{ev.title} 报名 截止", f"{ev.title} hackathon registration"):
+            queries = [f"{ev.title} 报名 截止", f"{ev.title} hackathon registration"]
+            for qi, q in enumerate(queries):
                 found = search_bing(q)
+                if not found:
+                    found = search_duckduckgo(q)
                 for r in found[:3]:
                     if r.url and r.url not in urls:
                         urls.append(r.url)
-                if not found:
-                    found = search_duckduckgo(q)
-                    for r in found[:3]:
-                        if r.url and r.url not in urls:
-                            urls.append(r.url)
+                if urls and qi == 0:
+                    break  # 第一个查询已有结果就不再跑第二个，节省请求
                 time.sleep(0.4)
         except Exception as exc:  # noqa: BLE001
             print(f"[warn] 核对搜索失败 {ev.title[:30]}: {exc}", file=sys.stderr)
         pages: list[dict] = []
-        for u in urls[:3]:
+        for u in urls[:2]:
             text = _fetch(u, timeout=12)
             if not text:
                 continue
@@ -1599,7 +1599,7 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
             if body:
                 pages.append({"url": u, "text": body[:2500]})
         pages.sort(key=lambda p: _official_score(p["url"], ev), reverse=True)
-        candidates[idx] = pages[:3]
+        candidates[idx] = pages[:2]
 
     with ThreadPoolExecutor(max_workers=6) as pool:
         for idx, ev in enumerate(targets):
@@ -1625,9 +1625,9 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
     )
 
     verified = partial = failed = 0
-    for start in range(0, len(targets), 5):
+    for start in range(0, len(targets), 10):
         batch = []
-        for idx in range(start, min(start + 5, len(targets))):
+        for idx in range(start, min(start + 10, len(targets))):
             ev = targets[idx]
             batch.append(
                 {
@@ -1653,7 +1653,7 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
             verify_prompt, json.dumps(batch, ensure_ascii=False), timeout=120
         )
         if not result:
-            for ev in targets[start : start + 5]:
+            for ev in targets[start : start + 10]:
                 ev.verify_status = "未能核对（AI 调用失败）"
                 failed += 1
             continue
@@ -1738,6 +1738,25 @@ def notion_append_children(page_id: str, children: list[dict]) -> None:
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Notion 追加块失败 {resp.status_code}: {resp.text[:500]}")
+
+
+def notion_get_children(page_id: str) -> list[dict]:
+    """读取页面全部子块。"""
+    blocks: list[dict] = []
+    cursor = None
+    while True:
+        url = f"{NOTION_API}/blocks/{page_id}/children?page_size=100"
+        if cursor:
+            url += f"&start_cursor={cursor}"
+        resp = requests.get(url, headers=notion_headers(), timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Notion 读取子块失败 {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        blocks.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+    return blocks
 
 
 def notion_update_page(page_id: str, properties: dict) -> None:
@@ -1896,6 +1915,12 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
             if norm in by_norm:
                 notion_update_page(by_norm[norm]["id"], props)
                 urls[norm] = by_norm[norm]["url"]
+                # 正文为空时补入详细内容（避免重复堆积）
+                try:
+                    if not notion_get_children(by_norm[norm]["id"]):
+                        notion_append_children(by_norm[norm]["id"], build_event_children(ev))
+                except RuntimeError as exc:
+                    print(f"[warn] 补充正文失败 {ev.title[:30]}: {exc}", file=sys.stderr)
                 updated += 1
             else:
                 page = notion_create_page(
@@ -2555,9 +2580,10 @@ def main() -> int:
     # AI 重新检索核对：定向搜索官方来源并提取准确时间等字段（按核对标准）
     if not args.no_verify:
         verified, partial, failed = verify_events(unique)
+        cap_txt = "全部" if VERIFY_MAX_EVENTS >= len(unique) else str(VERIFY_MAX_EVENTS)
         print(
             f"[info] 核对：已核对 {verified}，部分核对 {partial}，"
-            f"未能核对 {failed}（共 {len(unique)} 条，上限 {VERIFY_MAX_EVENTS}）"
+            f"未能核对 {failed}（共 {len(unique)} 条，上限 {cap_txt}）"
         )
         # 核对可能修正了时间字段，重新提取一次，保证日历日期准确
         for ev in unique:
