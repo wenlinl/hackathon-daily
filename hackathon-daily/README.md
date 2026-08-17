@@ -152,6 +152,24 @@ cloudflared tunnel --url http://localhost:8000
 > 注意：自建应用不支持从个人微信直接转发公众号文章，需要在企业微信内把链接粘贴/转发给应用；
 > 想要"个人微信直接转发"体验，用**微信客服**方案（需把接收端改成客服回调格式）。
 
+### 微信客服方案（个人微信一键转发，推荐）
+
+不用复制链接，在**个人微信**里直接把公众号文章转发给客服号即可：
+
+1. 企业微信管理后台 → 应用管理 → 微信客服 → 注册开通（未认证企业也可用，累计上限 100 个客户，自己用足够）；
+2. 到 [kf.weixin.qq.com](https://kf.weixin.qq.com)（微信客服管理后台）→ 客服账号 → 添加客服账号，记下 `open_kfid`；
+3. 开发配置 → 接收消息/事件回调：URL 填 `https://你的地址/wecom-kf`，生成 `Token` 和 `EncodingAESKey`；
+4. 开发配置 → 获取 `corpSecret`（微信客服的 Secret，不是自建应用的 Secret）；
+5. 客服账号 → 获取客服链接/二维码，在个人微信打开 → 开始会话；
+6. 以后看到公众号文章 → 个人微信直接**转发给该客服号** → 接收端收到事件后经 `sync_msg` 拉取正文 → AI 提取入库。
+
+接收端环境变量（对应 `/wecom-kf` 路由）：
+
+```bash
+WECOM_CORP_ID=... WECOM_KF_TOKEN=... WECOM_KF_AES_KEY=... WECOM_KF_SECRET=... \
+NOTION_TOKEN=... DEEPSEEK_API_KEY=... python src/wecom_receiver.py
+```
+
 也可以单独调用引擎：
 
 ```bash

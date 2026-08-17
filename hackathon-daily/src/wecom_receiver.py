@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""企业微信（WeCom）自建应用消息回调接收器。
+"""企业微信（WeCom）消息回调接收器。
 
 把公众号文章转发给企业微信里的自建应用联系人后，微信会推送 link 消息；
 这里接收回调 → 调用 ingest 引擎 → 分析并写入 Notion。
 
 企微回调要求 5 秒内响应，因此收到消息后立即回 "success"，AI 分析与写
 Notion 放到后台线程执行；同一消息重复推送时按 URL/内容去重。
+
+支持两条链路：
+- /wecom     自建应用回调（企业微信内给应用发消息）
+- /wecom-kf  微信客服回调（个人微信直接转发文章给客服号；正文经 sync_msg 拉取）
 
 本地运行：
     WECOM_CORP_ID=xxx WECOM_TOKEN=xxx WECOM_AES_KEY=xxx \
@@ -24,6 +28,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 from flask import Flask, request
 from wechatpy.enterprise import parse_message
@@ -32,12 +37,15 @@ from wechatpy.exceptions import InvalidSignatureException
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ingest  # noqa: E402
+import kf  # noqa: E402
 
 app = Flask(__name__)
 
 TOKEN = os.environ.get("WECOM_TOKEN", "")
 AES_KEY = os.environ.get("WECOM_AES_KEY", "")
 CORP_ID = os.environ.get("WECOM_CORP_ID", "")
+KF_TOKEN = os.environ.get("WECOM_KF_TOKEN", "")
+KF_AES_KEY = os.environ.get("WECOM_KF_AES_KEY", "")
 
 # 回调必须 5 秒内响应，AI 分析+写 Notion 较慢 → 后台线程处理；
 # 企微失败会重试推送，同一消息去重避免重复入库。
@@ -48,6 +56,10 @@ _SEEN_MAX = 500
 
 def _crypto() -> WeChatCrypto:
     return WeChatCrypto(TOKEN, AES_KEY, CORP_ID)
+
+
+def _kf_crypto() -> WeChatCrypto:
+    return WeChatCrypto(KF_TOKEN, KF_AES_KEY, CORP_ID)
 
 
 def _dedup(key: str) -> bool:
@@ -78,9 +90,47 @@ def _handle(message: Any) -> None:
         print(f"[error] 后台处理失败: {exc}", file=sys.stderr)
 
 
+def _handle_kf(open_kfid: str, cb_token: str) -> None:
+    try:
+        kf.sync(open_kfid, cb_token)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] 客服消息拉取失败: {exc}", file=sys.stderr)
+
+
 @app.route("/health")
 def health() -> str:
     return "ok"
+
+
+@app.route("/wecom-kf", methods=["GET", "POST"])
+def wecom_kf() -> tuple[str, int] | str:
+    signature = request.args.get("msg_signature", "")
+    timestamp = request.args.get("timestamp", "")
+    nonce = request.args.get("nonce", "")
+
+    if request.method == "GET":
+        # 微信客服后台配置回调时的 URL 验证
+        echostr = request.args.get("echostr", "")
+        try:
+            return _kf_crypto().check_signature(signature, timestamp, nonce, echostr)
+        except InvalidSignatureException:
+            return "invalid signature", 403
+
+    try:
+        xml = _kf_crypto().decrypt_message(request.data, signature, timestamp, nonce)
+        root = ET.fromstring(xml)
+        event = root.findtext("Event") or ""
+        cb_token = root.findtext("Token") or ""
+        open_kfid = root.findtext("OpenKfId") or ""
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] 客服回调解析失败: {exc}", file=sys.stderr)
+        return "error", 400
+
+    if event == "kf_msg_or_event" and open_kfid:
+        threading.Thread(target=_handle_kf, args=(open_kfid, cb_token), daemon=True).start()
+    else:
+        print(f"[info] 忽略客服事件: event={event} open_kfid={open_kfid}")
+    return "success"
 
 
 @app.route("/wecom", methods=["GET", "POST"])

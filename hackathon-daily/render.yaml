@@ -17,6 +17,13 @@ services:
         value: FUbk2M12tcCtYiS1V0
       - key: WECOM_AES_KEY
         value: GvZU9W4PNFu9YucYSEiYTwVOmqL3u5Fu3GAdlWGuT9S
+      # 微信客服（个人微信一键转发）配置，开通后在 kf.weixin.qq.com 获取
+      - key: WECOM_KF_TOKEN
+        sync: false
+      - key: WECOM_KF_AES_KEY
+        sync: false
+      - key: WECOM_KF_SECRET
+        sync: false
       # 以下在 Render 面板里手动填（sync: false 不会写进仓库）
       - key: NOTION_TOKEN
         sync: false
