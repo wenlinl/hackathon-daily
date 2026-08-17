@@ -2821,6 +2821,44 @@
       "region": "线上",
       "review_status": "AI 审核通过",
       "summary": "本次量子计算 黑客松 活动将会在线上组织,要求选手在一定时间内... 【报名方式】通过 华为云 比赛平台进行报名.需要提交学院、姓名..."
+    },
+    "具亮计划2026具身智能黑客松": {
+      "title": "具亮计划 2026 具身智能黑客松",
+      "first_seen": "2026-08-17",
+      "url": "https://weixin.sogou.com/link?url=dn9a_-gY295K0Rci_xozVXfdMkSQTLW6cwJThYulHEtVjXrGTiVgS7Zn45gw4TDHD_M48dCllOxyZ-W7ccS44VqXa8Fplpd9pgrNnTpAsPA8N_vs2ARw3Gvh2pd1FdUEAxZSDZYY9vXx2GfK7Su-0BmVwG14BUgRndG_6KwSzwUe79wAS46C1ejlqZ95CNWlZVBUvCgkoxYb-7XzKovFdBF5cu3XJ9qtNvYaZS6KnjVP9-iETkInNAWQ8XxqwuvBgeLf3gFVz9MYJSSFPgfogQ..&type=2&query=%E7%BE%8E%E5%9B%A2%E6%8A%80%E6%9C%AF%E5%9B%A2%E9%98%9F %E9%BB%91%E5%AE%A2%E6%9D%BE&token=56AC62AC879A4584B0B6E996B66BD87FB0005E3A6A82B7D8",
+      "source": "公众号(美团技术团队)",
+      "location": "深圳",
+      "deadline": "",
+      "competition_time": "",
+      "host": "EAIDC",
+      "themes": "具身智能",
+      "prize": "",
+      "eligibility": "",
+      "format": "线下",
+      "tags": "具身智能",
+      "status": "",
+      "region": "国内",
+      "review_status": "AI 审核通过",
+      "summary": "国内首个大型线下具身模型真机操作 黑客松 「具亮计划 2026」自启动以来,便吸引全国超百余支顶尖高校、科研院所及企业 团队 踊跃..."
+    },
+    "哲学黑客松": {
+      "title": "哲学黑客松",
+      "first_seen": "2026-08-17",
+      "url": "https://weixin.sogou.com/link?url=dn9a_-gY295K0Rci_xozVXfdMkSQTLW6cwJThYulHEtVjXrGTiVgS7Zn45gw4TDHr1DBMEjINTxyZ-W7ccS44VqXa8Fplpd9RmeKbEdSX_KW7ww1Ou8JeeDcHjUzzECvuLg-wrmc1SkQLq9A-l9mYW1I6vZJ1TkRCDWfSzyMX62dVheymWMR6HsWem578Q-9uU80mMwkpiu_knfMI4frJmDs1HZn-FEtn4pJvE6ROa1hVSVAEioifx7HvG-wakv-UrcwO4WsjFTs46dn8Efgxg..&type=2&query=%E9%BB%91%E5%AE%A2%E6%9D%BE 2026 %E6%8A%A5%E5%90%8D&token=56AD9887DFDD1DCCF7F1A1C1EB6025D7F86F13436A82B808",
+      "source": "微信公众号(搜狗索引)",
+      "location": "",
+      "deadline": "",
+      "competition_time": "",
+      "host": "SSPCZ",
+      "themes": "变与不变",
+      "prize": "",
+      "eligibility": "",
+      "format": "",
+      "tags": "哲学,黑客松",
+      "status": "报名中",
+      "region": "线上",
+      "review_status": "AI 审核通过",
+      "summary": "报名 信息: 报名 方式: 官网 sspcz.org 点击「注册 报名 」即可 报名 ... 2026 SSPCZ 哲学 黑客松 !News社团资讯我们大概是全校最“不..."
     }
   }
 }
