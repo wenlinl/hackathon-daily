@@ -10,6 +10,7 @@
 6. 写入 Notion：直接在 **2026 数据库（日历视图）** 中创建当天的一条记录
    （标题：`YYYY-MM-DD 黑客松活动汇总（N 条）`，日期=当天），
    记录的正文包含全部活动详情（报名时间、报名截止、竞赛时间、地点、摘要、来源链接、审核状态）。
+7. **发送日报邮件**：把当天摘要通过 SMTP 发到指定邮箱（默认 `aresleng@sina.com`；未配置 SMTP 时跳过）。
 
 ## 信息核对标准（创建每条信息时核对）
 
@@ -57,6 +58,12 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 | `NOTION_TOKEN` | Notion Integration Token（`secret_...`） |
 | `DEEPSEEK_API_KEY`（或 `LLM_API_KEY`） | 可选：AI 清洗/审核用的 LLM API Key（DeepSeek/OpenAI 兼容） |
 | `LLM_BASE_URL` / `LLM_MODEL` | 可选：自定义模型地址与模型名（默认 DeepSeek） |
+| `SMTP_HOST` | 可选：SMTP 服务器（如 `smtp.qq.com` / `smtp.163.com`），配置后每天发送日报邮件 |
+| `SMTP_PORT` | 可选：默认 `465`（SSL）；填 `587` 用 STARTTLS |
+| `SMTP_USER` / `SMTP_PASSWORD` | 可选：发件邮箱账号与授权码（第三方客户端授权码） |
+| `EMAIL_TO`（Variables） | 可选：收件人，默认 `aresleng@sina.com` |
+
+邮件正文取自 `data/daily_summary.md`（运行中生成，不入库），内容与日报一致：按国内/国外/线上分组，含时间、地点、链接与信息库跳转。
 
 ## 服务器端历史信息库
 

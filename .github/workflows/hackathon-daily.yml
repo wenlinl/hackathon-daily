@@ -49,6 +49,16 @@ jobs:
             git push
           fi
 
+      - name: Send daily email
+        if: always()
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+        run: python hackathon-daily/src/send_email.py
+
       - name: Summary
         if: always()
         run: |

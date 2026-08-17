@@ -1887,6 +1887,61 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
     return children
 
 
+def write_daily_summary(date_str: str, events: list[Event], dup_idx: set[int] | None = None) -> None:
+    """生成每日邮件正文摘要 data/daily_summary.md（供 send_email.py 发送）。"""
+    dup_idx = dup_idx or set()
+    region_counts: dict[str, int] = {}
+    for ev in events:
+        region_counts[ev.region or "国内"] = region_counts.get(ev.region or "国内", 0) + 1
+    region_text = " / ".join(
+        f"{k} {region_counts.get(k, 0)} 条" for k in ("国内", "国外", "线上") if region_counts.get(k)
+    )
+    lines = [
+        f"# {date_str} 黑客松活动汇总",
+        "",
+        f"共收录 {len(events)} 条活动（今天起未来 30 天内）"
+        + (f"，分组：{region_text}" if region_text else ""),
+        "",
+        "信息库页面：https://wenlinl.github.io/hackathon-daily/archive.html",
+        "",
+    ]
+    grouped: dict[str, list[tuple[int, Event]]] = {"国内": [], "国外": [], "线上": []}
+    for i, ev in enumerate(events, 1):
+        grouped.setdefault(ev.region or "国内", []).append((i, ev))
+    for region_name in ("国内", "国外", "线上"):
+        items = grouped.get(region_name, [])
+        if not items:
+            continue
+        lines.append(f"## {region_name}活动（{len(items)} 条）")
+        for i, ev in items:
+            tag = " ⚠️已收录" if i - 1 in dup_idx else ""
+            lines.append(f"### {i}. {ev.title}{tag}")
+            for label, val in (
+                ("主办方", ev.host),
+                ("主题", ev.themes),
+                ("奖金", ev.prize),
+                ("报名条件", ev.eligibility),
+                ("报名时间", ev.signup_start),
+                ("报名截止", ev.signup_deadline),
+                ("竞赛时间", ev.competition_time),
+                ("地点", ev.location),
+                ("形式", ev.format),
+                ("标签", ev.tags),
+                ("状态", ev.status),
+                ("审核", ev.review_status),
+                ("核对", ev.verify_status),
+            ):
+                if val:
+                    lines.append(f"- {label}：{val}")
+            if ev.url:
+                lines.append(f"- 链接：{ev.url}")
+            lines.append(f"- 信息库：{_resolve_archive_url(ev.title)}")
+            lines.append("")
+    summary_file = ARCHIVE_FILE.parent / "daily_summary.md"
+    summary_file.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[info] 已生成邮件摘要 {summary_file}")
+
+
 def select_balanced(events: list[Event], limit: int = MAX_EVENTS) -> list[Event]:
     """按 国内/国外/线上 分组比例均衡选取最多 limit 条，避免某一组被截断。"""
     buckets: dict[str, list[Event]] = {"国内": [], "国外": [], "线上": []}
@@ -2371,6 +2426,7 @@ def main() -> int:
     write_to_archive(date_str, selected)
     build_archive_html()
     write_to_calendar(date_str, selected, dup_idx)
+    write_daily_summary(date_str, selected, dup_idx)
     print("[done] 全部完成")
     return 0
 
