@@ -94,6 +94,32 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 
 已并入当天流程的条目会被标记 `processed: true`，不会重复入库。
 
+## 微信转发 → 自动收录（企业微信 WeCom，推荐）
+
+个人微信没有官方 API，但**企业微信官方回调**可以实现"转发即收录"：
+
+1. 注册企业微信（免费），创建**自建应用**，拿到 `corpId` / `Secret` / `AgentId`；
+2. 在自建应用里配置**接收消息服务器**：URL 填你的公网地址（如 `https://你的域名/wecom`），并生成 `Token` 和 `EncodingAESKey`；
+3. 把自建应用通过**微信插件**加到你的微信联系人，置顶；
+4. 以后在公众号看到有用黑客松，直接**转发给该联系人**；
+5. 接收端收到 link 消息 → `src/ingest.py` 用 AI 提取字段 → 写入 Notion 黑客松数据库 + 当天日报。
+
+本地运行接收端：
+
+```bash
+python -m pip install -r requirements.txt
+WECOM_TOKEN=xxx WECOM_AES_KEY=xxx WECOM_CORP_ID=xxx python src/wecom_receiver.py
+```
+
+再用 cloudflared / ngrok 把 8000 端口暴露成 HTTPS，填到企业微信后台即可。也可以单独调用引擎：
+
+```bash
+python src/ingest.py --title "标题" --link "https://mp.weixin.qq.com/s/..." --desc "摘要"
+python src/ingest.py --text "文章全文……"
+```
+
+> 个人微信的第三方自动化（itchat/Wechaty 非官方通道）违反微信条款且有封号风险，本项目不做。
+
 ## 本地试跑
 
 ```bash
