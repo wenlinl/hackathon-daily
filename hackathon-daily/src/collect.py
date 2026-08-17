@@ -81,7 +81,7 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-VERIFY_MAX_EVENTS = _env_int("VERIFY_MAX_EVENTS", 15)
+VERIFY_MAX_EVENTS = _env_int("VERIFY_MAX_EVENTS", 20)
 
 # ---------------------------------------------------------------------------
 # 信息核对标准（创建每条信息时按此核对）
@@ -1559,7 +1559,12 @@ def verify_events(events: list[Event]) -> tuple[int, int, int]:
             ev.verify_status = "未核对（未配置 AI）"
         return 0, 0, len(events)
 
-    targets = events[:VERIFY_MAX_EVENTS]
+    # 优先核对缺少报名截止时间的活动（用户最关心截止日期）
+    def _deadline_priority(ev: Event) -> int:
+        dl = (ev.signup_deadline or "").strip()
+        return 0 if (not dl or dl.startswith("约")) else 1
+
+    targets = sorted(events, key=_deadline_priority)[:VERIFY_MAX_EVENTS]
     for ev in events[VERIFY_MAX_EVENTS:]:
         ev.verify_status = "未核对（超出核对上限）"
 
@@ -1780,6 +1785,57 @@ def _map_status(status: str) -> str:
     return ""
 
 
+def _norm_date(s: str) -> str:
+    """把常见日期格式规范为 YYYY-MM-DD（仅明确日期，不做'约'估算）。"""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    m = re.match(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.match(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?", s)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.match(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日?", s)
+    if m:
+        return f"{datetime.now(BEIJING_TZ).year:04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return ""
+
+
+def build_event_children(ev: Event) -> list[dict]:
+    """构建单条黑客松记录的 Notion 正文子块（写入存档库 note 的正文）。"""
+    children: list[dict] = []
+    for label, val in (
+        ("🏢 主办方", ev.host),
+        ("📌 主题", ev.themes),
+        ("🏆 奖金", ev.prize),
+        ("👥 报名条件", ev.eligibility),
+        ("📝 报名时间", ev.signup_start),
+        ("⏳ 报名截止", ev.signup_deadline),
+        ("⏰ 竞赛时间", ev.competition_time),
+        ("📍 地点", ev.location),
+        ("🌐 形式", ev.format),
+        ("🏷️ 标签", ev.tags),
+        ("🚦 状态", ev.status),
+        ("🌏 分组", ev.region),
+    ):
+        if val:
+            children.append(_labeled_block("bulleted_list_item", label, val))
+    if ev.snippet:
+        children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:500]))
+    if ev.review_status:
+        note = ev.review_status + (f"：{ev.review_note}" if ev.review_note else "")
+        children.append(_labeled_block("bulleted_list_item", "🔎 审核", note))
+    if ev.verify_status:
+        note = ev.verify_status + (f"：{ev.verify_note}" if ev.verify_note else "")
+        children.append(_labeled_block("bulleted_list_item", "🔬 核对", note))
+    if ev.official_url:
+        children.append(_link_block("bulleted_list_item", "✅ 官方链接", "查看详情", ev.official_url))
+    if ev.url:
+        children.append(_link_block("bulleted_list_item", "🔗 来源链接", "查看详情", ev.url))
+    return children
+
+
 def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
     """把活动写入/更新到 Notion hackathons 数据库，返回 {归一化标题: 记录链接}。"""
     urls: dict[str, str] = {}
@@ -1801,9 +1857,9 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
         props["名称"] = {"title": [{"type": "text", "text": {"content": (ev.title or "")[:190]}}]}
         if is_new:
             props["日期"] = {"date": {"start": date_str}}
-        dl = (ev.signup_deadline or "").strip()
-        if dl[:4].isdigit():
-            props["报名截止"] = {"date": {"start": dl[:10]}}
+        dl = _norm_date(ev.signup_deadline)
+        if dl:
+            props["报名截止"] = {"date": {"start": dl}}
         if ev.location:
             props["地点"] = {"rich_text": [{"type": "text", "text": {"content": ev.location[:190]}}]}
         if ev.url:
@@ -1811,6 +1867,8 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
         summary_parts = []
         if ev.competition_time:
             summary_parts.append(f"竞赛时间：{ev.competition_time}")
+        if (ev.signup_deadline or "").strip() and not _norm_date(ev.signup_deadline):
+            summary_parts.append(f"报名截止（约）：{ev.signup_deadline}")
         if ev.host:
             summary_parts.append(f"主办方：{ev.host}")
         if ev.prize:
@@ -1843,6 +1901,7 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
                 page = notion_create_page(
                     {"type": "database_id", "database_id": DB_HACKATHON_ID},
                     props,
+                    children=build_event_children(ev),
                 )
                 urls[norm] = page.get("url", "")
                 by_norm[norm] = {"id": page["id"], "url": page.get("url", "")}
