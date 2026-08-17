@@ -24,7 +24,6 @@ jobs:
                   print("tcp connect: OK")
           except Exception as e:
               print("tcp connect FAIL:", type(e).__name__, e)
-              raise SystemExit(1)
           try:
               with smtplib.SMTP_SSL(host, port, timeout=15) as s:
                   code, msg = s.ehlo()
@@ -39,6 +38,7 @@ jobs:
               print("smtp_plain FAIL:", type(e).__name__, e)
           PY
       - name: Probe common SMTP hosts
+        if: always()
         run: |
           python3 - <<'PY'
           import socket
