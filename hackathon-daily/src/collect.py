@@ -1679,6 +1679,20 @@ def generate_event_intro(ev: Event) -> str:
     return intro
 
 
+def extract_title_from_text(text: str) -> str:
+    """从文章正文提取简洁活动标题；AI 失败时取首行截断。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    system = "你是活动信息整理助手。只输出 JSON 对象：{\"title\": \"活动标题\"}，标题 20-50 字。"
+    data = _llm_completion(system, f"请为下面的内容提取一个简洁的活动标题：\n\n{text[:3000]}")
+    title = ((data or {}).get("title") or "").strip()
+    if title:
+        return title[:190]
+    first = text.splitlines()[0].strip().strip("#").strip()
+    return first[:190] if first else ""
+
+
 def _official_score(url: str, ev: Event) -> int:
     """候选来源打分：与已知链接同域名最高，官方/活动平台域名加分。"""
     if not url:

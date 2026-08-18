@@ -23,6 +23,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ingest  # noqa: E402
+import ocr  # noqa: E402
 
 KF_API = "https://qyapi.weixin.qq.com/cgi-bin/kf"
 CURSOR_FILE = Path(__file__).resolve().parent.parent / "data" / "kf_cursor.json"
@@ -30,6 +31,13 @@ CURSOR_FILE = Path(__file__).resolve().parent.parent / "data" / "kf_cursor.json"
 _token_cache: dict[str, str | float] = {"token": "", "expire": 0.0}
 _seen_msgids: set[str] = set()
 _sync_lock = threading.Lock()
+
+# 微信客服 48 小时内最多回复 5 条/客户，逐条回执会被限流（errcode 95001）。
+# 改为按批次合并成一条汇总回执：短延迟（8s）内的事件合并发送。
+_reply_buffer: dict[tuple[str, str], list[str]] = {}
+_reply_lock = threading.Lock()
+_flush_timer: threading.Timer | None = None
+_REPLY_DEBOUNCE_SECONDS = 8.0
 
 
 def get_access_token() -> str:
@@ -91,6 +99,21 @@ def _handle_msg(msg: dict) -> None:
         elif msgtype == "text":
             text = ((msg.get("text") or {}).get("content") or "").strip()
             result = ingest.ingest(text=text)
+        elif msgtype == "image":
+            media_id = ((msg.get("image") or {}).get("media_id") or "")
+            image_bytes = _download_media(media_id)
+            if not image_bytes:
+                result = {"ok": False, "title": "", "message": "添加失败：图片下载失败"}
+            else:
+                text = ocr.extract_text_from_image(image_bytes)
+                if not text:
+                    result = {
+                        "ok": False,
+                        "title": "",
+                        "message": "未能从图片中识别出文字，请直接转发文章链接或粘贴正文",
+                    }
+                else:
+                    result = ingest.ingest(text=text)
         else:
             print(f"[info] 客服消息忽略类型: {msgtype}")
             return
@@ -106,7 +129,62 @@ def _handle_msg(msg: dict) -> None:
         open_kfid = msg.get("open_kfid", "")
         print(f"[info] 回执：{result['message']}")
         if external_userid and open_kfid:
-            _send_kf_message(external_userid, open_kfid, result["message"])
+            _queue_reply(external_userid, open_kfid, result["message"])
+
+
+def _queue_reply(external_userid: str, open_kfid: str, text: str) -> None:
+    with _reply_lock:
+        _reply_buffer.setdefault((external_userid, open_kfid), []).append(text)
+        global _flush_timer
+        if _flush_timer is None or not _flush_timer.is_alive():
+            _flush_timer = threading.Timer(_REPLY_DEBOUNCE_SECONDS, _flush_replies)
+            _flush_timer.daemon = True
+            _flush_timer.start()
+
+
+def _flush_replies() -> None:
+    global _flush_timer
+    with _reply_lock:
+        items = list(_reply_buffer.items())
+        _reply_buffer.clear()
+        _flush_timer = None
+    for (external_userid, open_kfid), msgs in items:
+        if not msgs:
+            continue
+        if len(msgs) == 1:
+            body = msgs[0]
+        else:
+            ok = [m for m in msgs if m.startswith("已添加")]
+            fail = [m for m in msgs if not m.startswith("已添加")]
+            lines = []
+            if ok:
+                titles = [m[len("已添加："):] for m in ok]
+                lines.append(f"✅ 已收录 {len(ok)} 条：" + "；".join(titles))
+            if fail:
+                lines.append(f"⚠️ 未收录 {len(fail)} 条：" + "；".join(fail))
+            body = "\n".join(lines)
+        _send_kf_message(external_userid, open_kfid, body[:1900])
+
+
+def _download_media(media_id: str) -> bytes | None:
+    """通过企微 media/get 下载图片消息内容。"""
+    if not media_id:
+        return None
+    try:
+        token = get_access_token()
+        resp = requests.get(
+            "https://qyapi.weixin.qq.com/cgi-bin/media/get",
+            params={"access_token": token, "media_id": media_id},
+            timeout=60,
+        )
+        ctype = resp.headers.get("Content-Type", "")
+        if resp.status_code != 200 or ctype.startswith("application/json") or ctype.startswith("text/"):
+            print(f"[warn] 下载媒体失败: {resp.status_code} {resp.text[:200]}", file=sys.stderr)
+            return None
+        return resp.content
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 下载媒体异常: {exc}", file=sys.stderr)
+        return None
 
 
 def _send_kf_message(external_userid: str, open_kfid: str, text: str) -> bool:

@@ -27,15 +27,18 @@ def _today() -> dt.date:
 
 def _build_event(title: str, link: str, desc: str, text: str) -> collect.Event | None:
     title = (title or "").strip()
+    if not title and (text or "").strip():
+        title = collect.extract_title_from_text(text)
     if not title:
         return None
     snippet = (text or desc or "").strip()
     if len(snippet) < 20:
         snippet = f"{title} 黑客松活动信息。"
+    snippet_limit = 6000 if (text or "").strip() else 1200
     ev = collect.Event(
         title=title[:190],
         url=(link or "").strip(),
-        snippet=snippet[:1200],
+        snippet=snippet[:snippet_limit],
         source="微信转发-手动收录",
     )
     collect.extract_fields(ev, _today())
