@@ -6,8 +6,9 @@ services:
     name: hackathon-daily-wecom
     runtime: python
     plan: free
+    rootDirectory: hackathon-daily
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 1 -b 0.0.0.0:8000 --timeout 60 wecom_receiver:app
+    startCommand: gunicorn -w 1 -b 0.0.0.0:8000 --chdir src --timeout 60 wecom_receiver:app
     healthCheckPath: /health
     autoDeploy: true
     envVars:
@@ -17,13 +18,12 @@ services:
         value: FUbk2M12tcCtYiS1V0
       - key: WECOM_AES_KEY
         value: GvZU9W4PNFu9YucYSEiYTwVOmqL3u5Fu3GAdlWGuT9S
-      # 微信客服（个人微信一键转发）配置，开通后在 kf.weixin.qq.com 获取
       - key: WECOM_KF_TOKEN
-        sync: false
+        value: 2fYmCR
       - key: WECOM_KF_AES_KEY
-        sync: false
+        value: uq2BInwAIHTayNdpcRGajPGUU5nXBN4y7juAEc1fkmB
       - key: WECOM_KF_SECRET
-        sync: false
+        value: zimlarXguD87O5mZo4_76MjCqYYF_i5N1sf12mC-JAo
       # 以下在 Render 面板里手动填（sync: false 不会写进仓库）
       - key: NOTION_TOKEN
         sync: false
