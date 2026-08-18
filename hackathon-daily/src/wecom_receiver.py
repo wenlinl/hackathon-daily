@@ -26,6 +26,7 @@ import hashlib
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -52,6 +53,37 @@ KF_AES_KEY = os.environ.get("WECOM_KF_AES_KEY", "")
 _seen: set[str] = set()
 _seen_lock = threading.Lock()
 _SEEN_MAX = 500
+
+
+def _kf_catchup_loop() -> None:
+    """后台兜底：每 10 分钟补拉一次客服消息（防止回调丢失导致漏收）。
+
+    配合 keepalive 定时请求（GitHub Actions 每 5 分钟 ping /health）保持免费实例常醒。
+    """
+    while True:
+        try:
+            open_ids = [
+                x.strip()
+                for x in os.environ.get("WECOM_KF_OPEN_IDS", "").split(",")
+                if x.strip()
+            ]
+            for open_kfid in open_ids:
+                try:
+                    kf.sync(open_kfid, "")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[warn] 兜底同步失败 {open_kfid}: {exc}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] 兜底同步循环异常: {exc}", file=sys.stderr)
+        time.sleep(600)
+
+
+def _start_kf_catchup() -> None:
+    if os.environ.get("WECOM_KF_OPEN_IDS", "").strip():
+        threading.Thread(target=_kf_catchup_loop, daemon=True).start()
+        print("[info] 客服兜底同步线程已启动（每 10 分钟）")
+
+
+_start_kf_catchup()
 
 
 def _crypto() -> WeChatCrypto:

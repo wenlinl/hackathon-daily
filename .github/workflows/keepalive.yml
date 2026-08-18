@@ -1,0 +1,14 @@
+name: keepalive-render
+
+on:
+  schedule:
+    # 每 5 分钟 ping 一次 Render 免费实例，避免闲置休眠，保证兜底同步线程持续运行
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render health endpoint
+        run: curl -s -o /dev/null -w "%{http_code}\n" https://hackathon-daily-wecom.onrender.com/health
