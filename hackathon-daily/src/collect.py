@@ -268,6 +268,7 @@ class Event:
     format: str = ""         # 形式（线上/线下/混合）
     tags: str = ""           # 标签
     region: str = ""         # 分组：国内/国外/线上
+    event_type: str = ""     # 类型：黑客松/创投路演/竞赛/峰会/其他（AI 判断）
     archive_url: str = ""    # 该活动在 Notion hackathons 数据库中的记录链接
     review_status: str = ""  # AI 审核状态
     review_note: str = ""    # 审核说明
@@ -278,6 +279,7 @@ class Event:
     def as_markdown(self) -> str:
         parts = [f"### {self.title}"]
         for label, val in (
+            ("🏷️ 类型", self.event_type),
             ("🏢 主办方", self.host),
             ("📌 主题", self.themes),
             ("🏆 奖金", self.prize),
@@ -1472,7 +1474,9 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
         "你是黑客松/编程马拉松信息审核助手。下面是抓取到的活动信息，请逐条清洗并审核。\n"
         "清洗要求：修正标题里的噪音（如'报名倒计时''今晚截止'等前缀可去掉，保留活动名）；"
         "从摘要中提取主办方、主题/赛道、奖金/奖池、报名条件、报名时间、报名截止、竞赛时间、"
-        "地点、形式（线上/线下/混合）、状态、标签。无法确定的字段留空字符串。\n"
+        "地点、形式（线上/线下/混合）、状态、标签、报名/申请链接（official_url，原文里最像官方报名入口的网址）。"
+        "另外判断活动类型（event_type）：黑客松/编程马拉松、创投/融资路演、技术竞赛、峰会/大会、"
+        "其他——从五类中选最贴切的一个填入。无法确定的字段留空字符串。\n"
         "审核重点（按顺序判断）：\n"
         "① 真实性：是否为真实可报名的黑客松/编程马拉松活动。课程广告、招聘、往期回顾、纯讲座、"
         "会议、视频比赛、夏校等一律 keep=false，reason 写明'非黑客松活动'及具体类型。\n"
@@ -1489,6 +1493,7 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
         "\"cleaned_title\":\"\",\"host\":\"\",\"themes\":\"\",\"prize\":\"\",\"eligibility\":\"\","
         "\"signup_start\":\"\",\"signup_deadline\":\"\",\"competition_time\":\"\","
         "\"location\":\"\",\"format\":\"\",\"status\":\"\",\"tags\":\"\","
+        "\"event_type\":\"\",\"official_url\":\"\","
         "\"region\":\"国内或国外或线上\",\"reason\":\"\"}]}"
         " region 字段：按举办方/地点判断，线上活动填\"线上\"，国内主办方或国内城市填\"国内\"，其余填\"国外\"。"
     )
@@ -1586,6 +1591,8 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
                 ("status", "status"),
                 ("tags", "tags"),
                 ("region", "region"),
+                ("event_type", "event_type"),
+                ("official_url", "official_url"),
             ):
                 val = (v.get(key) or "").strip()
                 if val:
@@ -1645,6 +1652,7 @@ def generate_event_intro(ev: Event) -> str:
     lines = []
     for label, val in (
         ("活动名称", ev.title),
+        ("类型", ev.event_type),
         ("主办方", ev.host),
         ("主题", ev.themes),
         ("奖金", ev.prize),
@@ -2011,6 +2019,7 @@ def build_event_children(ev: Event) -> list[dict]:
     """构建单条黑客松记录的 Notion 正文子块（写入存档库 note 的正文）。"""
     children: list[dict] = []
     for label, val in (
+        ("🏷️ 类型", ev.event_type),
         ("🏢 主办方", ev.host),
         ("📌 主题", ev.themes),
         ("🏆 奖金", ev.prize),
@@ -2067,6 +2076,8 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
             props["报名截止"] = {"date": {"start": dl}}
         if ev.location:
             props["地点"] = {"rich_text": [{"type": "text", "text": {"content": ev.location[:190]}}]}
+        if ev.event_type:
+            props["类型"] = {"select": {"name": ev.event_type[:50]}}
         if ev.url:
             props["来源链接"] = {"url": ev.url}
         summary_parts = []
@@ -2287,6 +2298,7 @@ def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int]
             children.append(_text_block("heading_3", title))
             # 字段列表：固定顺序 + 统一占位，保证标准格式
             for label, val in (
+                ("🏷️ 类型", ev.event_type),
                 ("🏢 主办方", ev.host),
                 ("📌 主题", ev.themes),
                 ("🏆 奖金", ev.prize),
