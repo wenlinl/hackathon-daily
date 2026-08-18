@@ -6,7 +6,7 @@ services:
     name: hackathon-daily-wecom
     runtime: python
     plan: free
-    rootDirectory: hackathon-daily
+    rootDir: hackathon-daily
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn -w 1 -b 0.0.0.0:8000 --chdir src --timeout 60 wecom_receiver:app
     healthCheckPath: /health
