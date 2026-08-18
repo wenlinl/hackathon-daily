@@ -63,6 +63,19 @@ def _append_to_today_note(date_str: str, ev: collect.Event) -> None:
     children = [collect._text_block("heading_3", ev.title)]
     children.extend(collect.build_event_children(ev))
     if page_id:
+        # 防重复：日报里已有同名活动则跳过追加（游标丢失重拉旧消息时避免重复）
+        existing_titles = set()
+        for block in collect.notion_get_children(page_id):
+            btype = block.get("type")
+            if btype == "heading_3":
+                txt = "".join(
+                    t.get("plain_text", "")
+                    for t in (block.get(btype) or {}).get("rich_text", [])
+                )
+                existing_titles.add(collect.normalize_title(txt))
+        if collect.normalize_title(ev.title) in existing_titles:
+            print(f"[info] 当天日报已包含「{ev.title[:30]}」，跳过追加")
+            return
         collect.notion_append_children(page_id, children)
         print(f"[ok] 已追加到当天日报 {page_id}")
     else:

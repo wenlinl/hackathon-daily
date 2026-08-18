@@ -24,6 +24,9 @@ services:
         value: uq2BInwAIHTayNdpcRGajPGUU5nXBN4y7juAEc1fkmB
       - key: WECOM_KF_SECRET
         value: zimlarXguD87O5mZo4_76MjCqYYF_i5N1sf12mC-JAo
+      # 客服消息游标持久化页面（Notion，重启不丢，避免重复处理旧消息）
+      - key: WECOM_KF_CURSOR_PAGE_ID
+        value: 3c060e0b-0bbf-81cd-8b7b-d0b9f466e721
       # 图片（长截图）识别：火山方舟视觉模型
       - key: VISION_API_KEY
         sync: false

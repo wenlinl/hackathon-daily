@@ -22,11 +22,14 @@ from pathlib import Path
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collect  # noqa: E402
 import ingest  # noqa: E402
 import ocr  # noqa: E402
 
 KF_API = "https://qyapi.weixin.qq.com/cgi-bin/kf"
 CURSOR_FILE = Path(__file__).resolve().parent.parent / "data" / "kf_cursor.json"
+# 游标持久化页面（Notion，Render 容器磁盘重启会丢本地文件，故写入 Notion 兜底）
+CURSOR_PAGE_ID = os.environ.get("WECOM_KF_CURSOR_PAGE_ID", "")
 
 _token_cache: dict[str, str | float] = {"token": "", "expire": 0.0}
 _seen_msgids: set[str] = set()
@@ -63,19 +66,67 @@ def get_access_token() -> str:
 
 
 def _load_cursors() -> dict[str, str]:
+    """读取游标：优先本地文件，其次 Notion 页面（跨重启持久）。"""
     try:
-        return json.loads(CURSOR_FILE.read_text(encoding="utf-8"))
+        local = json.loads(CURSOR_FILE.read_text(encoding="utf-8"))
     except Exception:
+        local = {}
+    if local:
+        return {k: v for k, v in local.items() if isinstance(v, str)}
+    if not CURSOR_PAGE_ID:
         return {}
+    try:
+        for block in collect.notion_get_children(CURSOR_PAGE_ID):
+            btype = block.get("type", "")
+            rich = (block.get(btype) or {}).get("rich_text", []) if btype else []
+            text = "".join(t.get("plain_text", "") for t in rich).strip()
+            if text.startswith("{"):
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    return {k: v for k, v in data.items() if isinstance(v, str)}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 读取 Notion 游标失败: {exc}", file=sys.stderr)
+    return {}
 
 
 def _save_cursors(cursors: dict[str, str]) -> None:
+    """保存游标：写本地文件 + 写入 Notion 页面（重启后可用）。"""
     try:
         CURSOR_FILE.write_text(
             json.dumps(cursors, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] 保存客服游标失败: {exc}", file=sys.stderr)
+    if not CURSOR_PAGE_ID or not cursors:
+        return
+    text = json.dumps(cursors, ensure_ascii=False)
+    try:
+        children = collect.notion_get_children(CURSOR_PAGE_ID)
+        para_id = ""
+        for block in children:
+            if block.get("type") == "paragraph":
+                para_id = block["id"]
+                break
+        payload = {
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": text[:1990]}}]}
+        }
+        if para_id:
+            requests.patch(
+                f"{collect.NOTION_API}/blocks/{para_id}",
+                headers=collect.notion_headers(),
+                json=payload,
+                timeout=30,
+            )
+        else:
+            requests.patch(
+                f"{collect.NOTION_API}/blocks/{CURSOR_PAGE_ID}/children",
+                headers=collect.notion_headers(),
+                json={"children": [{"object": "block", "type": "paragraph", **payload}]},
+                timeout=30,
+            )
+        print(f"[info] 客服游标已持久化到 Notion: {text[:36]}...")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 写入 Notion 游标失败: {exc}", file=sys.stderr)
 
 
 def _handle_msg(msg: dict) -> None:
