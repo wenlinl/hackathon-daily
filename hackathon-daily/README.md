@@ -102,6 +102,11 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 > （GitHub Actions 去掉了 schedule，collect 步骤由 `ENABLE_DAILY_SCRAPE=true` 控制），
 > 数据源只有你转发到微信客服/自建应用的链接或正文。
 
+功能：
+
+- **微信回执**：转发处理完成后，微信客服会话会收到回复——成功时"已添加：{名称}"，失败/未收录时回复具体原因。
+- **AI 详细介绍**：每条写入 Notion hackathons 数据库的 note 会附带 AI 生成的中文详细介绍（400-600 字，覆盖背景/主题/赛制/时间地点/奖项/报名方式）。
+
 1. 注册企业微信（免费），创建**自建应用**，拿到 `corpId` / `Secret` / `AgentId`；
 2. 把接收端部署到公网（见下），拿到形如 `https://xxx/wecom` 的真实地址；
 3. 在自建应用里配置**接收消息服务器**：URL 填该地址，并生成 `Token` 和 `EncodingAESKey`（保存时企微会发验证请求，必须能正常回显才通过）；

@@ -77,38 +77,48 @@ def _append_to_today_note(date_str: str, ev: collect.Event) -> None:
         print(f"[ok] 已创建当天日报 {page.get('url')}")
 
 
-def ingest(title: str = "", link: str = "", desc: str = "", text: str = "", dry_run: bool = False) -> int:
-    """分析并收录一条转发来的微信文章。返回 0 成功 / 1 失败。"""
+def ingest(title: str = "", link: str = "", desc: str = "", text: str = "", dry_run: bool = False) -> dict:
+    """分析并收录一条转发来的微信文章。
+
+    返回 {"ok": bool, "title": str, "message": str}：
+    - ok=True  成功入库，message 形如 "已添加：{标题}"
+    - ok=False 失败/未收录，message 包含失败原因（用于微信回执）
+    """
     today = _today()
     date_str = today.isoformat()
     ev = _build_event(title, link, desc, text)
     if ev is None:
         print("[error] 缺少标题", file=sys.stderr)
-        return 1
+        return {"ok": False, "title": "", "message": "添加失败：缺少标题（转发内容不完整）"}
     print(f"[info] 收到转发：{ev.title}")
 
-    # AI 清洗与审核（真实黑客松/近期/报名来得及）
-    mode, passed, needs_review, dropped = collect.ai_clean_and_review([ev])
-    print(f"[info] {mode}：通过 {passed}，待确认 {needs_review}，剔除 {dropped}")
-    if ev.review_status == "审核不通过":
-        print(f"[warn] 该条被 AI 判定不收录：{ev.review_note}")
-        return 0  # 不收录不算失败
-    if not ev.region:
-        ev.region = collect.classify_region(ev)
-    if ev.region == "国外":
-        print("[warn] 纯海外活动，不收录")
-        return 0
-    print(ev.as_markdown())
+    try:
+        # AI 清洗与审核（真实黑客松/近期/报名来得及）
+        mode, passed, needs_review, dropped = collect.ai_clean_and_review([ev])
+        print(f"[info] {mode}：通过 {passed}，待确认 {needs_review}，剔除 {dropped}")
+        if ev.review_status == "审核不通过":
+            reason = ev.review_note or "AI 判定该内容不是近期可报名的真实黑客松"
+            print(f"[warn] 该条被 AI 判定不收录：{reason}")
+            return {"ok": False, "title": ev.title, "message": f"未收录：AI 审核未通过（{reason}）"}
+        if not ev.region:
+            ev.region = collect.classify_region(ev)
+        if ev.region == "国外":
+            print("[warn] 纯海外活动，不收录")
+            return {"ok": False, "title": ev.title, "message": "未收录：纯海外线下活动（当前只收国内/线上）"}
+        print(ev.as_markdown())
 
-    if dry_run:
-        print("[dry-run] 不写入 Notion")
-        return 0
+        if dry_run:
+            print("[dry-run] 不写入 Notion")
+            return {"ok": True, "title": ev.title, "message": f"已添加：{ev.title}（dry-run）"}
 
-    urls = collect.upsert_notion_archive(date_str, [ev])
-    ev.archive_url = urls.get(collect.normalize_title(ev.title), "")
-    _append_to_today_note(date_str, ev)
-    print("[done] 已收录到 Notion 黑客松数据库与当天日报")
-    return 0
+        urls = collect.upsert_notion_archive(date_str, [ev])
+        ev.archive_url = urls.get(collect.normalize_title(ev.title), "")
+        _append_to_today_note(date_str, ev)
+        print("[done] 已收录到 Notion 黑客松数据库与当天日报")
+        return {"ok": True, "title": ev.title, "message": f"已添加：{ev.title}"}
+    except Exception as exc:  # noqa: BLE001
+        print(f"[error] 收录失败: {exc}", file=sys.stderr)
+        return {"ok": False, "title": getattr(ev, "title", ""), "message": f"添加失败：{exc}"}
 
 
 def main() -> int:
@@ -119,7 +129,9 @@ def main() -> int:
     parser.add_argument("--text", default="", help="文章全文（文本消息时用）")
     parser.add_argument("--dry-run", action="store_true", help="只分析不写入")
     args = parser.parse_args()
-    return ingest(args.title, args.link, args.desc, args.text, args.dry_run)
+    result = ingest(args.title, args.link, args.desc, args.text, args.dry_run)
+    print(result["message"])
+    return 0 if result.get("ok") else 1
 
 
 if __name__ == "__main__":

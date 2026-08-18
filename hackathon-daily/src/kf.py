@@ -83,18 +83,57 @@ def _handle_msg(msg: dict) -> None:
     try:
         if msgtype == "link":
             link = msg.get("link", {}) or {}
-            ingest.ingest(
+            result = ingest.ingest(
                 title=(link.get("title") or "").strip(),
                 link=(link.get("url") or "").strip(),
                 desc=(link.get("desc") or "").strip(),
             )
         elif msgtype == "text":
             text = ((msg.get("text") or {}).get("content") or "").strip()
-            ingest.ingest(text=text)
+            result = ingest.ingest(text=text)
         else:
             print(f"[info] 客服消息忽略类型: {msgtype}")
+            return
     except Exception as exc:  # noqa: BLE001
         print(f"[error] 客服消息处理失败: {exc}", file=sys.stderr)
+        result = {
+            "ok": False,
+            "title": "",
+            "message": f"添加失败：{exc}",
+        }
+    if result:
+        external_userid = msg.get("external_userid", "")
+        open_kfid = msg.get("open_kfid", "")
+        print(f"[info] 回执：{result['message']}")
+        if external_userid and open_kfid:
+            _send_kf_message(external_userid, open_kfid, result["message"])
+
+
+def _send_kf_message(external_userid: str, open_kfid: str, text: str) -> bool:
+    """通过微信客服 send_msg 接口回复客户；返回是否成功。"""
+    if not text:
+        return False
+    try:
+        token = get_access_token()
+        resp = requests.post(
+            f"{KF_API}/send_msg",
+            params={"access_token": token},
+            json={
+                "touser": external_userid,
+                "open_kfid": open_kfid,
+                "msgtype": "text",
+                "text": {"content": text[:1900]},
+            },
+            timeout=20,
+        )
+        data = resp.json()
+        if data.get("errcode", 0) != 0:
+            print(f"[warn] 客服回复失败: {data}", file=sys.stderr)
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 客服回复异常: {exc}", file=sys.stderr)
+        return False
 
 
 def sync(open_kfid: str, cb_token: str = "") -> None:

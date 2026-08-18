@@ -1640,6 +1640,45 @@ def _llm_completion(
         return None
 
 
+def generate_event_intro(ev: Event) -> str:
+    """用 AI 为单条黑客松生成 400-600 字中文详细介绍；失败或为空返回空串。"""
+    lines = []
+    for label, val in (
+        ("活动名称", ev.title),
+        ("主办方", ev.host),
+        ("主题", ev.themes),
+        ("奖金", ev.prize),
+        ("报名条件", ev.eligibility),
+        ("报名时间", ev.signup_start),
+        ("报名截止", ev.signup_deadline),
+        ("竞赛时间", ev.competition_time),
+        ("地点", ev.location),
+        ("形式", ev.format),
+        ("标签", ev.tags),
+        ("状态", ev.status),
+        ("分组", ev.region),
+        ("摘要", ev.snippet),
+        ("来源链接", ev.url),
+    ):
+        if val:
+            lines.append(f"- {label}：{val}")
+    system = (
+        "你是黑客松/编程马拉松活动编辑，负责撰写准确、专业的中文活动介绍。"
+        "只输出 JSON 对象，格式为 {\"intro\": \"介绍正文\"}；intro 为 400-600 字的中文，"
+        "可分 2-3 段。已知信息缺失的字段写“待确认”，严禁编造时间、地点、奖金等事实。"
+    )
+    user = (
+        "请根据以下已知信息生成该黑客松的详细介绍，涵盖：活动背景与主办方、主题与赛制、"
+        "时间地点（报名时间/截止、竞赛时间）、奖项与适合人群、报名方式。\n\n"
+        + "\n".join(lines)
+    )
+    data = _llm_completion(system, user, timeout=120)
+    intro = ((data or {}).get("intro") or "").strip()
+    if intro:
+        print(f"[info] 已生成详细介绍（{len(intro)} 字）：{ev.title[:40]}")
+    return intro
+
+
 def _official_score(url: str, ev: Event) -> int:
     """候选来源打分：与已知链接同域名最高，官方/活动平台域名加分。"""
     if not url:
@@ -2056,10 +2095,18 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
                     print(f"[warn] 补充正文失败 {ev.title[:30]}: {exc}", file=sys.stderr)
                 updated += 1
             else:
+                children = build_event_children(ev)
+                intro = generate_event_intro(ev)
+                if intro:
+                    children.append(_text_block("heading_3", "详细介绍（AI 生成）"))
+                    for para in re.split(r"\n\s*\n", intro):
+                        para = para.strip()
+                        if para:
+                            children.append(_text_block("paragraph", para[:1900]))
                 page = notion_create_page(
                     {"type": "database_id", "database_id": DB_HACKATHON_ID},
                     props,
-                    children=build_event_children(ev),
+                    children=children,
                 )
                 urls[norm] = page.get("url", "")
                 by_norm[norm] = {"id": page["id"], "url": page.get("url", "")}

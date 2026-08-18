@@ -77,15 +77,18 @@ def _dedup(key: str) -> bool:
 def _handle(message: Any) -> None:
     try:
         if message.type == "link":
-            ingest.ingest(
+            result = ingest.ingest(
                 title=getattr(message, "title", ""),
                 link=getattr(message, "url", ""),
                 desc=getattr(message, "description", ""),
             )
         elif message.type == "text":
-            ingest.ingest(text=getattr(message, "content", ""))
+            result = ingest.ingest(text=getattr(message, "content", ""))
         else:
             print(f"[info] 忽略非文章消息类型: {message.type}")
+            return
+        if result:
+            print(f"[info] 处理结果：{result['message']}")
     except Exception as exc:  # noqa: BLE001
         print(f"[error] 后台处理失败: {exc}", file=sys.stderr)
 
