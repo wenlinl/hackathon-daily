@@ -1476,14 +1476,17 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
         "从摘要中提取主办方、主题/赛道、奖金/奖池、报名条件、报名时间、报名截止、竞赛时间、"
         "地点、形式（线上/线下/混合）、状态、标签、报名/申请链接（official_url，原文里最像官方报名入口的网址）。"
         "另外判断活动类型（event_type）：黑客松/编程马拉松、创投/融资路演、技术竞赛、峰会/大会、"
-        "其他——从五类中选最贴切的一个填入。无法确定的字段留空字符串。\n"
+        "其他——从五类中选最贴切的一个填入（规范值：黑客松、创投路演、竞赛、峰会、其他）。"
+        "无法确定的字段留空字符串。\n"
         "审核重点（按顺序判断）：\n"
-        "① 真实性：是否为真实可报名的黑客松/编程马拉松活动。课程广告、招聘、往期回顾、纯讲座、"
-        "会议、视频比赛、夏校等一律 keep=false，reason 写明'非黑客松活动'及具体类型。\n"
+        "① 真实性：是否为真实可报名/可参与的活动（黑客松、编程/技术竞赛、大赛、创投/融资路演、"
+        "峰会/大会、开发者活动等均可）。只有纯广告、招聘、往期回顾（获奖名单/决赛直播）、课程培训、"
+        "纯资讯文章等非活动内容才 keep=false，reason 写明'非活动内容'及具体类型。\n"
         "② 时效性：是否为近期开始的活动（今天起未来约30天内）。活动时间明显已过、或属往期内容（如"
         "标题带往年年份、'决赛直播''获奖名单'等）判 keep=false，reason 写明'活动已结束'。\n"
-        "③ 报名可行性：报名截止是否已过。已截止或活动已开始的判 keep=false，reason 写明"
-        "'报名已截止/活动已开始'及截止日期；只有无法判断活动时间、也无法判断报名截止是否已过的"
+        "③ 报名可行性：是否仍可报名/投稿。只要存在任一赛道/渠道的报名或投稿截止在今天或未来，"
+        "都判 keep=true；只有所有报名/投稿渠道都明确已截止才 keep=false，reason 写明"
+        "'报名已截止'及截止日期；只有无法判断活动时间、也无法判断报名截止是否已过的"
         "才标记 needs_review=true。\n"
         "注意：截止日期是'约数/待确认'、或活动时间取自聚合站结构化数据的，都算信息充分，"
         "确认为真实且时间在近期内的直接 keep=true、needs_review=false。"
@@ -1597,10 +1600,28 @@ def ai_clean_and_review(events: list[Event]) -> tuple[str, int, int, int]:
                 val = (v.get(key) or "").strip()
                 if val:
                     setattr(ev, field, val)
+            ev.event_type = _normalize_event_type(ev.event_type)
         ok = True
     if not ok:
         mode = "规则清洗（AI 调用失败）"
     return mode, passed, needs_review, dropped
+
+
+def _normalize_event_type(t: str) -> str:
+    """把 AI 给出的类型规整为规范值：黑客松 / 创投路演 / 竞赛 / 峰会 / 其他。"""
+    t = (t or "").strip()
+    if not t:
+        return ""
+    low = t.lower()
+    if any(k in t or k in low for k in ("黑客", "编程马拉松", "创客松", "hackathon", "hack")):
+        return "黑客松"
+    if any(k in t or k in low for k in ("创投", "融资", "路演", "投资", "资本", "基金", "venture", "pitch")):
+        return "创投路演"
+    if any(k in t or k in low for k in ("竞赛", "大赛", "比赛", "挑战赛", "选拔", "contest", "challenge", "competition")):
+        return "竞赛"
+    if any(k in t or k in low for k in ("峰会", "大会", "论坛", "沙龙", "开发者日", "summit", "conference")):
+        return "峰会"
+    return "其他"
 
 
 def _llm_completion(
