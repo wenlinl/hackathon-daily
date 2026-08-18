@@ -1,0 +1,33 @@
+name: hackathon-daily-report
+
+on:
+  schedule:
+    # 北京时间每天 00:00 = UTC 16:00（前一天）
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r hackathon-daily/requirements.txt
+
+      - name: Send today's hackathon daily report
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ vars.EMAIL_TO }}
+        run: python hackathon-daily/src/send_daily_report.py

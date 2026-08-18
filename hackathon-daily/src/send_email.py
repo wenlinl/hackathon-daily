@@ -23,6 +23,11 @@ from email.mime.text import MIMEText
 from html import escape as html_escape
 from pathlib import Path
 
+try:
+    import certifi
+except ImportError:  # pragma: no cover
+    certifi = None  # type: ignore
+
 SUMMARY_FILE = Path(__file__).resolve().parent.parent / "data" / "daily_summary.md"
 
 
@@ -53,7 +58,8 @@ def _markdown_to_html(text: str) -> str:
     return "\n".join(out)
 
 
-def main() -> int:
+def send_markdown_email(subject: str, body: str) -> int:
+    """用已配置的 SMTP 发送一封 Markdown 正文邮件。返回 0 成功 / 1 失败。"""
     host = _env("SMTP_HOST")
     if not host:
         print("[info] 未配置 SMTP_HOST，跳过邮件发送（配置后每天自动发送）")
@@ -66,12 +72,6 @@ def main() -> int:
     if not user or not password:
         print("[warn] 缺少 SMTP_USER / SMTP_PASSWORD，跳过邮件发送")
         return 0
-    if not SUMMARY_FILE.exists():
-        print("[warn] 未找到日报摘要文件，跳过邮件发送")
-        return 0
-
-    body = SUMMARY_FILE.read_text(encoding="utf-8")
-    subject = body.splitlines()[0].lstrip("# ").strip() if body else "黑客松活动汇总"
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = email_from
@@ -80,7 +80,10 @@ def main() -> int:
     msg.attach(MIMEText(_markdown_to_html(body), "html", "utf-8"))
 
     try:
-        context = ssl.create_default_context()
+        if certifi:
+            context = ssl.create_default_context(cafile=certifi.where())
+        else:
+            context = ssl.create_default_context()
         if port == 465:
             with smtplib.SMTP_SSL(host, port, timeout=30, context=context) as server:
                 server.login(user, password)
@@ -95,6 +98,15 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - 发送失败明确报错
         print(f"[error] 邮件发送失败: {exc}", file=sys.stderr)
         return 1
+
+
+def main() -> int:
+    if not SUMMARY_FILE.exists():
+        print("[warn] 未找到日报摘要文件，跳过邮件发送")
+        return 0
+    body = SUMMARY_FILE.read_text(encoding="utf-8")
+    subject = body.splitlines()[0].lstrip("# ").strip() if body else "黑客松活动汇总"
+    return send_markdown_email(subject, body)
 
 
 if __name__ == "__main__":
