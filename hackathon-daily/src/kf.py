@@ -222,21 +222,23 @@ def _download_media(media_id: str) -> bytes | None:
     """通过企微 media/get 下载图片消息内容。"""
     if not media_id:
         return None
-    try:
-        token = get_access_token()
-        resp = requests.get(
-            "https://qyapi.weixin.qq.com/cgi-bin/media/get",
-            params={"access_token": token, "media_id": media_id},
-            timeout=60,
-        )
-        ctype = resp.headers.get("Content-Type", "")
-        if resp.status_code != 200 or ctype.startswith("application/json") or ctype.startswith("text/"):
-            print(f"[warn] 下载媒体失败: {resp.status_code} {resp.text[:200]}", file=sys.stderr)
-            return None
-        return resp.content
-    except Exception as exc:  # noqa: BLE001
-        print(f"[warn] 下载媒体异常: {exc}", file=sys.stderr)
-        return None
+    for attempt in range(3):
+        try:
+            token = get_access_token()
+            resp = requests.get(
+                "https://qyapi.weixin.qq.com/cgi-bin/media/get",
+                params={"access_token": token, "media_id": media_id},
+                timeout=90,
+            )
+            ctype = resp.headers.get("Content-Type", "")
+            if resp.status_code != 200 or ctype.startswith("application/json") or ctype.startswith("text/"):
+                print(f"[warn] 下载媒体失败: {resp.status_code} {resp.text[:200]}", file=sys.stderr)
+                return None
+            return resp.content
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] 下载媒体异常（第 {attempt + 1} 次）: {exc}", file=sys.stderr)
+            time.sleep(2 * (attempt + 1))
+    return None
 
 
 def _send_kf_message(external_userid: str, open_kfid: str, text: str) -> bool:

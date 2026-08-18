@@ -10,11 +10,14 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import ssl
 import sys
 import urllib.request
+
+from PIL import Image
 
 try:
     import certifi
@@ -25,9 +28,15 @@ except Exception:  # pragma: no cover
 
 DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 
+# 长截图（如 1206×34000 像素）超出视觉模型尺寸限制会返回 400，
+# 这里按高度切段识别再拼接。
+CHUNK_HEIGHT = 3000
+CHUNK_OVERLAP = 120
+MAX_WIDTH = 4000
 
-def extract_text_from_image(image_bytes: bytes, mime: str = "image/png") -> str:
-    """把长图/截图的文字提取为纯文本；失败返回空串。"""
+
+def _call_vision(image_bytes: bytes, mime: str = "image/png") -> str:
+    """调用一次视觉模型；失败返回空串。"""
     api_key = os.environ.get("VISION_API_KEY", "")
     base_url = os.environ.get("VISION_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
     model = os.environ.get("VISION_MODEL", "")
@@ -70,8 +79,44 @@ def extract_text_from_image(image_bytes: bytes, mime: str = "image/png") -> str:
         with urllib.request.urlopen(req, timeout=180, context=_CTX) as resp:
             data = json.load(resp)
         text = (data["choices"][0]["message"]["content"] or "").strip()
-        print(f"[info] 图片识别出 {len(text)} 字")
         return text
     except Exception as exc:  # noqa: BLE001
         print(f"[warn] 视觉识别失败: {exc}", file=sys.stderr)
         return ""
+
+
+def extract_text_from_image(image_bytes: bytes, mime: str = "image/png") -> str:
+    """把长图/截图的文字提取为纯文本；超长图自动切段；失败返回空串。"""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.load()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[warn] 图片解析失败: {exc}", file=sys.stderr)
+        return ""
+
+    width, height = img.size
+    if height <= CHUNK_HEIGHT and width <= MAX_WIDTH:
+        text = _call_vision(image_bytes, mime)
+        if text:
+            print(f"[info] 图片识别出 {len(text)} 字")
+        return text
+
+    # 超长图：按高度切段（带重叠），逐段识别后拼接
+    print(f"[info] 长图 {width}x{height}，切段识别…")
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    parts: list[str] = []
+    y = 0
+    while y < height:
+        top = max(0, y - CHUNK_OVERLAP)
+        bottom = min(height, y + CHUNK_HEIGHT)
+        crop = img.crop((0, top, width, bottom))
+        buf = io.BytesIO()
+        crop.save(buf, format="JPEG", quality=90)
+        text = _call_vision(buf.getvalue(), "image/jpeg")
+        if text:
+            parts.append(text)
+        y += CHUNK_HEIGHT
+    joined = "\n".join(parts).strip()
+    print(f"[info] 长图识别完成，共 {len(parts)} 段，{len(joined)} 字")
+    return joined
