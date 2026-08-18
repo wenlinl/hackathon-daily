@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -294,3 +295,29 @@ def sync(open_kfid: str, cb_token: str = "") -> None:
                 cursor = next_cursor
             if not data.get("has_more"):
                 break
+
+
+def main() -> int:
+    """命令行入口：python kf.py --sync 补拉所有已配置客服账号的新消息。
+
+    环境变量 WECOM_KF_OPEN_IDS 用逗号分隔多个 open_kfid。
+    """
+    parser = argparse.ArgumentParser(description="微信客服消息同步（兜底补拉）")
+    parser.add_argument("--sync", action="store_true", help="拉取并处理所有客服账号的新消息")
+    args = parser.parse_args()
+    if not args.sync:
+        parser.print_help()
+        return 1
+    open_ids = [x.strip() for x in os.environ.get("WECOM_KF_OPEN_IDS", "").split(",") if x.strip()]
+    if not open_ids:
+        print("[warn] 未配置 WECOM_KF_OPEN_IDS，无可同步的客服账号", file=sys.stderr)
+        return 1
+    for open_kfid in open_ids:
+        print(f"[info] 兜底同步 {open_kfid}")
+        sync(open_kfid, "")
+    print("[done] 兜底同步完成")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
