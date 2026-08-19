@@ -1624,6 +1624,51 @@ def _normalize_event_type(t: str) -> str:
     return "其他"
 
 
+def ai_extract_fields(ev: Event) -> None:
+    """仅提取字段与分类类型，不做审核/剔除（手动转发内容直接收录）。"""
+    if not LLM_API_KEY:
+        return
+    prompt = (
+        "你是活动信息整理助手。从下面这条活动信息中提取字段："
+        "host(主办方)、themes(主题/赛道)、prize(奖金/奖池)、eligibility(报名条件)、"
+        "signup_start(报名开始时间)、signup_deadline(报名截止)、competition_time(竞赛时间)、"
+        "location(地点)、format(形式：线上/线下/混合)、status(状态)、tags(标签)、"
+        "event_type(类型，规范值：黑客松、创投路演、竞赛、峰会、其他)、"
+        "official_url(报名/申请链接，原文里最像官方报名入口的网址)、"
+        "region(国内/国外/线上，按地点与举办方判断，地点在哪个国家就填哪个，不要拒绝海外活动)。"
+        "无法确定的字段留空字符串。只做字段提取，不做任何审核、判断或剔除。\n"
+        "只输出 JSON：{\"host\":\"\",\"themes\":\"\",\"prize\":\"\",\"eligibility\":\"\","
+        "\"signup_start\":\"\",\"signup_deadline\":\"\",\"competition_time\":\"\",\"location\":\"\","
+        "\"format\":\"\",\"status\":\"\",\"tags\":\"\",\"event_type\":\"\",\"official_url\":\"\","
+        "\"region\":\"\"}"
+    )
+    user_content = f"标题：{ev.title}\n正文/摘要：\n{(ev.snippet or '')[:6000]}"
+    data = _llm_completion(prompt, user_content, timeout=120)
+    if not data:
+        return
+    for field, key in (
+        ("host", "host"),
+        ("themes", "themes"),
+        ("prize", "prize"),
+        ("eligibility", "eligibility"),
+        ("signup_start", "signup_start"),
+        ("signup_deadline", "signup_deadline"),
+        ("competition_time", "competition_time"),
+        ("location", "location"),
+        ("format", "format"),
+        ("status", "status"),
+        ("tags", "tags"),
+        ("event_type", "event_type"),
+        ("official_url", "official_url"),
+        ("region", "region"),
+    ):
+        val = (data.get(key) or "").strip()
+        if val:
+            setattr(ev, field, val)
+    ev.event_type = _normalize_event_type(ev.event_type)
+    print(f"[info] AI 提取完成：类型={ev.event_type or '待确认'}，地点={ev.location or '待确认'}")
+
+
 def _llm_completion(
     system_prompt: str,
     user_content: str,

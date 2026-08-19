@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """微信转发消息 → 分析 → Notion 收录引擎。
 
-收到一条转发来的微信文章（标题/描述/链接，或全文），做 AI 清洗提取，
-写入 Notion hackathons 数据库，并追加到当天的 Notion 黑客松日报。
+收到一条转发来的微信文章（标题/描述/链接、全文或长图），做 AI 字段提取与类型分类，
+写入 Notion Activities 数据库，并追加到当天的 Notion 黑客松日报。
+手动转发内容视为用户已审核：不做真实性/时效性/地点拦截，一律收录。
 
 用法：
     python ingest.py --title "标题" --link "https://mp.weixin.qq.com/s/..." --desc "描述"
@@ -109,18 +110,11 @@ def ingest(title: str = "", link: str = "", desc: str = "", text: str = "", dry_
     print(f"[info] 收到转发：{ev.title}")
 
     try:
-        # AI 清洗与审核（真实黑客松/近期/报名来得及）
-        mode, passed, needs_review, dropped = collect.ai_clean_and_review([ev])
-        print(f"[info] {mode}：通过 {passed}，待确认 {needs_review}，剔除 {dropped}")
-        if ev.review_status == "审核不通过":
-            reason = ev.review_note or "AI 判定该内容不是近期可报名的真实黑客松"
-            print(f"[warn] 该条被 AI 判定不收录：{reason}")
-            return {"ok": False, "title": ev.title, "message": f"未收录：AI 审核未通过（{reason}）"}
+        # 手动转发：用户已审核，不做拦截，仅做字段提取与类型分类
+        collect.ai_extract_fields(ev)
         if not ev.region:
             ev.region = collect.classify_region(ev)
-        if ev.region == "国外":
-            print("[warn] 纯海外活动，不收录")
-            return {"ok": False, "title": ev.title, "message": "未收录：纯海外线下活动（当前只收国内/线上）"}
+        ev.review_status = "用户已审核（手动转发）"
         print(ev.as_markdown())
 
         if dry_run:
