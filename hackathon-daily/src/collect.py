@@ -270,6 +270,7 @@ class Event:
     region: str = ""         # 分组：国内/国外/线上
     event_type: str = ""     # 类型：黑客松/创投路演/竞赛/峰会/其他（AI 判断）
     archive_url: str = ""    # 该活动在 Notion hackathons 数据库中的记录链接
+    source_image_url: str = ""  # 转发原图的公开 URL（写入 note 末尾素材区）
     review_status: str = ""  # AI 审核状态
     review_note: str = ""    # 审核说明
     verify_status: str = ""  # 核对状态：已核对/部分核对/信息冲突/未能核对
@@ -1753,6 +1754,69 @@ def generate_event_intro(ev: Event) -> str:
     return intro
 
 
+def upload_source_image(image_bytes: bytes, title: str = "") -> str:
+    """把转发原图上传到仓库 docs/images/，返回公开 URL；未配置 GITHUB_TOKEN 返回空串。"""
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if not token:
+        print("[warn] 未配置 GITHUB_TOKEN，原图不上传", file=sys.stderr)
+        return ""
+    import base64
+    import hashlib
+
+    ext = "jpg"
+    try:
+        from PIL import Image
+        import io
+
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            if (im.format or "").upper() == "PNG":
+                ext = "png"
+    except Exception:  # noqa: BLE001
+        pass
+    digest = hashlib.sha1(image_bytes).hexdigest()[:10]
+    ts = datetime.now(BEIJING_TZ).strftime("%Y%m%d-%H%M%S")
+    safe = re.sub(r"[^\w\u4e00-\u9fff]+", "_", (title or "image")[:30]).strip("_") or "image"
+    path = f"docs/images/{ts}_{digest}_{safe}.{ext}"
+    api = f"https://api.github.com/repos/wenlinl/hackathon-daily/contents/{path}"
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
+    resp = requests.get(api, headers=headers, timeout=30)
+    sha = resp.json().get("sha") if resp.status_code == 200 else None
+    payload = {
+        "message": "chore(hackathon-daily): upload source image [skip render]",
+        "content": base64.b64encode(image_bytes).decode("ascii"),
+    }
+    if sha:
+        payload["sha"] = sha
+    r = requests.put(api, headers=headers, json=payload, timeout=90)
+    if r.status_code not in (200, 201):
+        print(f"[warn] 原图上传失败: {r.status_code} {r.text[:200]}", file=sys.stderr)
+        return ""
+    url = f"https://raw.githubusercontent.com/wenlinl/hackathon-daily/main/{path}"
+    print(f"[info] 原图已上传: {url}")
+    return url
+
+
+def build_material_blocks(ev: Event, existing_text: str = "") -> list[dict]:
+    """构建 note 末尾的"原始素材"区：转发原图或原始链接（已存在则跳过）。"""
+    blocks: list[dict] = []
+    has_img = bool(ev.source_image_url) and ev.source_image_url not in existing_text
+    has_link = bool(ev.url) and ev.url not in existing_text
+    if not (has_img or has_link):
+        return blocks
+    blocks.append(_text_block("heading_3", "📎 原始素材"))
+    if has_img:
+        blocks.append(
+            {
+                "object": "block",
+                "type": "image",
+                "image": {"type": "external", "external": {"url": ev.source_image_url}},
+            }
+        )
+    if has_link:
+        blocks.append(_link_block("bulleted_list_item", "🔗 原始链接", "打开原文", ev.url))
+    return blocks
+
+
 def extract_title_from_text(text: str) -> str:
     """从文章正文提取简洁活动标题；AI 失败时取首行截断。"""
     text = (text or "").strip()
@@ -2180,8 +2244,24 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
                 urls[norm] = by_norm[norm]["url"]
                 # 正文为空时补入详细内容（避免重复堆积）
                 try:
-                    if not notion_get_children(by_norm[norm]["id"]):
+                    existing_children = notion_get_children(by_norm[norm]["id"])
+                    if not existing_children:
                         notion_append_children(by_norm[norm]["id"], build_event_children(ev))
+                    else:
+                        # 末尾补原始素材（原图/链接，已存在则跳过）
+                        existing_text = ""
+                        for b in existing_children:
+                            btype = b.get("type", "")
+                            if btype == "image":
+                                img = b.get("image", {}) or {}
+                                ext_url = (img.get("external") or {}).get("url", "")
+                                if ext_url:
+                                    existing_text += ext_url + " "
+                            rich = (b.get(btype) or {}).get("rich_text", []) if btype else []
+                            existing_text += "".join(t.get("plain_text", "") for t in rich) + " "
+                        material = build_material_blocks(ev, existing_text)
+                        if material:
+                            notion_append_children(by_norm[norm]["id"], material)
                 except RuntimeError as exc:
                     print(f"[warn] 补充正文失败 {ev.title[:30]}: {exc}", file=sys.stderr)
                 updated += 1
@@ -2194,6 +2274,7 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
                         para = para.strip()
                         if para:
                             children.append(_text_block("paragraph", para[:1900]))
+                children.extend(build_material_blocks(ev))
                 page = notion_create_page(
                     {"type": "database_id", "database_id": DB_HACKATHON_ID},
                     props,

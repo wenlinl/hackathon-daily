@@ -165,7 +165,7 @@ def _handle_msg(msg: dict) -> None:
                         "message": "未能从图片中识别出文字，请直接转发文章链接或粘贴正文",
                     }
                 else:
-                    result = ingest.ingest(text=text)
+                    result = ingest.ingest(text=text, image_bytes=image_bytes)
         else:
             print(f"[info] 客服消息忽略类型: {msgtype}")
             return

@@ -36,6 +36,9 @@ services:
         value: https://ark.cn-beijing.volces.com/api/v3
       - key: VISION_MODEL
         value: doubao-seed-2-1-turbo-260628
+      # 转发原图托管：上传到 GitHub 仓库 docs/images/（用你的 GitHub PAT）
+      - key: GITHUB_TOKEN
+        sync: false
       # 以下在 Render 面板里手动填（sync: false 不会写进仓库）
       - key: NOTION_TOKEN
         sync: false

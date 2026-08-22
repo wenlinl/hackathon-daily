@@ -94,7 +94,14 @@ def _append_to_today_note(date_str: str, ev: collect.Event) -> None:
         print(f"[ok] 已创建当天日报 {page.get('url')}")
 
 
-def ingest(title: str = "", link: str = "", desc: str = "", text: str = "", dry_run: bool = False) -> dict:
+def ingest(
+    title: str = "",
+    link: str = "",
+    desc: str = "",
+    text: str = "",
+    dry_run: bool = False,
+    image_bytes: bytes | None = None,
+) -> dict:
     """分析并收录一条转发来的微信文章。
 
     返回 {"ok": bool, "title": str, "message": str}：
@@ -115,6 +122,8 @@ def ingest(title: str = "", link: str = "", desc: str = "", text: str = "", dry_
         if not ev.region:
             ev.region = collect.classify_region(ev)
         ev.review_status = "用户已审核（手动转发）"
+        if image_bytes and not ev.source_image_url:
+            ev.source_image_url = collect.upload_source_image(image_bytes, ev.title)
         print(ev.as_markdown())
 
         if dry_run:
