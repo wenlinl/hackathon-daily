@@ -518,7 +518,11 @@ def _bitable_add_record(app_token: str, table_id: str, fields: dict[str, Any]) -
 def sync_event(ev: Any, source: str = "", today: str = "") -> str:
     """同步一条活动到飞书知识库，返回页面 URL；未配置凭据时返回空串。"""
     if not APP_ID or not APP_SECRET:
-        print("[info] 未配置 FEISHU_APP_ID/FEISHU_APP_SECRET，跳过飞书同步（可选功能）")
+        print(
+            "[warn] 飞书同步跳过：未配置 FEISHU_APP_ID/FEISHU_APP_SECRET，"
+            "活动仅写入 Notion。请检查 Render 环境变量或 hackathon-daily/.env 的 FEISHU_* 配置。",
+            file=sys.stderr,
+        )
         return ""
     norm = _norm_title(getattr(ev, "title", "") or "")
     if not norm:
@@ -567,7 +571,11 @@ def sync_event(ev: Any, source: str = "", today: str = "") -> str:
 def sync_events(events: list[Any], source: str = "") -> dict[str, str]:
     """批量同步；单条失败不影响其余，返回 {归一化标题: 飞书 URL}。"""
     if not APP_ID or not APP_SECRET:
-        print("[info] 未配置 FEISHU_APP_ID/FEISHU_APP_SECRET，跳过飞书同步（可选功能）")
+        print(
+            "[warn] 飞书同步跳过：未配置 FEISHU_APP_ID/FEISHU_APP_SECRET，"
+            "活动仅写入 Notion。请检查 Render 环境变量或 hackathon-daily/.env 的 FEISHU_* 配置。",
+            file=sys.stderr,
+        )
         return {}
     beijing = dt.timezone(dt.timedelta(hours=8))
     today = dt.datetime.now(beijing).date().isoformat()
