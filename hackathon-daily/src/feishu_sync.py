@@ -515,6 +515,129 @@ def _bitable_add_record(app_token: str, table_id: str, fields: dict[str, Any]) -
     )
 
 
+_ATTACHMENT_KEYWORDS = ("附件", "素材", "文件", "图片", "材料", "attachment", "file", "image", "img")
+
+
+def _pick_attachment_field(meta: dict[str, int]) -> str | None:
+    """从表格字段中找附件类型（type=17）字段，优先名字含"附件/素材/文件/图片"的。"""
+    for name, ftype in meta.items():
+        if ftype == 17 and any(k in name.lower() for k in _ATTACHMENT_KEYWORDS):
+            return name
+    for name, ftype in meta.items():
+        if ftype == 17:
+            return name
+    return None
+
+
+def _download_bytes(url: str, timeout: int = 180) -> bytes:
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
+
+def _filename_from_url(url: str) -> str:
+    name = (url or "").rstrip("/").split("/")[-1]
+    name = re.sub(r"[?&#].*$", "", name).strip()
+    return name or "source.jpg"
+
+
+def _upload_bitable_file(app_token: str, file_bytes: bytes, filename: str) -> str:
+    """上传文件到飞书 bitable 空间（parent=app_token），返回 file_token。"""
+
+    def call(token: str) -> dict:
+        resp = requests.post(
+            f"{FEISHU_BASE}/drive/v1/medias/upload_all",
+            headers={"Authorization": f"Bearer {token}"},
+            data={
+                "file_name": filename,
+                "parent_type": "bitable_file",
+                "parent_node": app_token,
+                "size": str(len(file_bytes)),
+            },
+            files={"file": (filename, file_bytes)},
+            timeout=180,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    data = call(get_tenant_access_token())
+    code = str(data.get("code", ""))
+    if code.startswith(_AUTH_ERR_PREFIX):
+        _token_cache["token"] = ""
+        data = call(get_tenant_access_token())
+    if data.get("code") != 0:
+        raise RuntimeError(f"飞书上传素材失败: code={data.get('code')} msg={data.get('msg')}")
+    token = (data.get("data") or {}).get("file_token") or ""
+    if not token:
+        raise RuntimeError("飞书上传素材未返回 file_token")
+    return token
+
+
+def _bitable_find_record(
+    app_token: str, table_id: str, title_field: str, norm_title: str
+) -> dict | None:
+    """按归一化标题查找飞书表格记录。"""
+    page_token = ""
+    while True:
+        params: dict[str, Any] = {"page_size": 200}
+        if page_token:
+            params["page_token"] = page_token
+        data = _api(
+            "GET",
+            f"/bitable/v1/apps/{app_token}/tables/{table_id}/records",
+            params=params,
+        )
+        for rec in data.get("items", []):
+            val = (rec.get("fields") or {}).get(title_field)
+            if isinstance(val, str) and _norm_title(val) == norm_title:
+                return rec
+        if not data.get("has_more"):
+            break
+        page_token = data.get("page_token", "")
+    return None
+
+
+def _merge_attachments(fields_val: Any) -> list[dict]:
+    out: list[dict] = []
+    if isinstance(fields_val, list):
+        for item in fields_val:
+            if isinstance(item, dict) and item.get("file_token"):
+                out.append({"file_token": item["file_token"]})
+    return out
+
+
+def attach_material_to_record(
+    app_token: str,
+    table_id: str,
+    title_field: str,
+    norm_title: str,
+    source_url: str,
+) -> bool:
+    """把原始素材文件上传并挂到飞书记录的附件字段（已存在则跳过）。"""
+    record = _bitable_find_record(app_token, table_id, title_field, norm_title)
+    if not record:
+        raise RuntimeError("飞书表格中未找到对应记录")
+    meta = _bitable_field_map(app_token, table_id)
+    att_field = _pick_attachment_field(meta)
+    if not att_field:
+        raise RuntimeError("飞书表格没有附件类型字段")
+    existing = _merge_attachments((record.get("fields") or {}).get(att_field))
+    filename = _filename_from_url(source_url)
+    data = _download_bytes(source_url)
+    token = _upload_bitable_file(app_token, data, filename)
+    if token in {item.get("file_token") for item in existing}:
+        print(f"[info] 附件已存在，跳过：{filename[:60]}")
+        return False
+    existing.append({"file_token": token, "name": filename})
+    _api(
+        "PUT",
+        f"/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record['record_id']}",
+        payload={"fields": {att_field: existing}},
+    )
+    print(f"[ok] 原始素材已挂到飞书附件：{filename[:80]}")
+    return True
+
+
 def sync_event(ev: Any, source: str = "", today: str = "") -> str:
     """同步一条活动到飞书知识库，返回页面 URL；未配置凭据时返回空串。"""
     if not APP_ID or not APP_SECRET:
@@ -544,7 +667,19 @@ def sync_event(ev: Any, source: str = "", today: str = "") -> str:
             print(f"[info] 飞书多维表格已存在：{title[:40]}（跳过）")
             return f"https://feishu.cn/base/{obj_token}"
         meta = _bitable_field_map(obj_token, table_id)
-        _bitable_add_record(obj_token, table_id, _bitable_fields(meta, ev, today=today))
+        fields = _bitable_fields(meta, ev, today=today)
+        att_field = _pick_attachment_field(meta)
+        src_url = getattr(ev, "source_image_url", "") or ""
+        if att_field and src_url:
+            try:
+                filename = _filename_from_url(src_url)
+                file_bytes = _download_bytes(src_url)
+                token = _upload_bitable_file(obj_token, file_bytes, filename)
+                fields[att_field] = [{"file_token": token, "name": filename}]
+                print(f"[info] 原始素材已上传飞书附件：{filename[:80]}")
+            except Exception as exc:  # noqa: BLE001 素材上传失败不影响记录入库
+                print(f"[warn] 原始素材上传失败（不影响入库）: {exc}", file=sys.stderr)
+        _bitable_add_record(obj_token, table_id, fields)
         print(f"[info] 已写入飞书多维表格：{title[:40]}（{source or '手动收录'}）")
         return f"https://feishu.cn/base/{obj_token}"
 
