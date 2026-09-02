@@ -44,14 +44,3 @@ services:
         sync: false
       - key: DEEPSEEK_API_KEY
         sync: false
-      # 飞书知识库同步（可选）：收录后同步到 食刻Shike / public-Activity
-      - key: FEISHU_APP_ID
-        sync: false
-      - key: FEISHU_APP_SECRET
-        sync: false
-      - key: FEISHU_WIKI_SPACE_ID
-        sync: false
-      - key: FEISHU_WIKI_NODE_TOKEN
-        sync: false
-      - key: FEISHU_BITABLE_TABLE_ID
-        sync: false
