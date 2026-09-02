@@ -36,6 +36,11 @@ jobs:
           VERIFY_LLM_BASE_URL: ${{ secrets.VERIFY_LLM_BASE_URL }}
           VERIFY_LLM_MODEL: ${{ secrets.VERIFY_LLM_MODEL }}
           VERIFY_MAX_EVENTS: ${{ vars.VERIFY_MAX_EVENTS }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_WIKI_SPACE_ID: ${{ secrets.FEISHU_WIKI_SPACE_ID }}
+          FEISHU_WIKI_NODE_TOKEN: ${{ secrets.FEISHU_WIKI_NODE_TOKEN }}
+          FEISHU_BITABLE_TABLE_ID: ${{ secrets.FEISHU_BITABLE_TABLE_ID }}
         run: python hackathon-daily/src/collect.py
 
       - name: Commit archive updates
@@ -52,16 +57,6 @@ jobs:
             git pull --rebase origin main || true
             git push
           fi
-
-      - name: Send daily email
-        if: ${{ vars.ENABLE_DAILY_SCRAPE == 'true' }}
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          EMAIL_TO: ${{ vars.EMAIL_TO }}
-        run: python hackathon-daily/src/send_email.py
 
       - name: Summary
         if: always()

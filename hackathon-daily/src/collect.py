@@ -38,14 +38,13 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 
 # Notion 目标（来自之前会话的验证结果）
 DAILY_RECORD_PAGE_ID = "33660e0b0bbf80e9aa0ffe29b3ce9444"  # Daily Record 页面
-DB_2026_ID = "33660e0b0bbf806ab9e9effb9cebb712"           # "2026" 数据库（日历视图所在）
-DB_HACKATHON_ID = "3bb60e0b0bbf8179aa88d98a77a635ef"      # Notion "hackathons" 数据库（黑客松存档库）
+DB_HACKATHON_ID = "3cc60e0b0bbf80de8337fc2d3a856c34"      # Notion "Activities-Public" 数据库（微信转发最终落库）
 
 # 服务器端历史信息库（本地 JSON 文件，随仓库持久化，替代 Notion 数据库）
 ARCHIVE_FILE = Path(__file__).resolve().parent.parent / "data" / "archive.json"
 # 手动补充的文章（微信全文等，用户/助手贴入，下次运行自动并入）
 MANUAL_ARTICLES_FILE = Path(__file__).resolve().parent.parent / "manual" / "articles.json"
-# 信息库可浏览页面（GitHub Pages，/docs 目录），每条目带锚点供日报跳转
+# 信息库可浏览页面（GitHub Pages，/docs 目录），每条目带锚点供记录跳转
 ARCHIVE_PAGE_URL = os.environ.get(
     "ARCHIVE_PAGE_URL", "https://wenlinl.github.io/hackathon-daily/archive.html"
 )
@@ -269,7 +268,7 @@ class Event:
     tags: str = ""           # 标签
     region: str = ""         # 分组：国内/国外/线上
     event_type: str = ""     # 类型：黑客松/创投路演/竞赛/峰会/其他（AI 判断）
-    archive_url: str = ""    # 该活动在 Notion hackathons 数据库中的记录链接
+    archive_url: str = ""    # 该活动在 Notion Activities-Public 数据库中的记录链接
     source_image_url: str = ""  # 转发原图的公开 URL（写入 note 末尾素材区）
     review_status: str = ""  # AI 审核状态
     review_note: str = ""    # 审核说明
@@ -2096,12 +2095,12 @@ def notion_update_page(page_id: str, properties: dict) -> None:
 
 
 def notion_archive_titles() -> set[str]:
-    """读取 Notion hackathons 数据库已收录的活动标题（归一化后），用于查重。"""
+    """读取 Notion Activities-Public 数据库已收录的活动标题（归一化后），用于查重。"""
     titles: set[str] = set()
     try:
         rows = query_database_rows(DB_HACKATHON_ID)
     except RuntimeError as exc:
-        print(f"[warn] 无法读取 Notion hackathons 数据库，跳过查重: {exc}", file=sys.stderr)
+        print(f"[warn] 无法读取 Notion Activities-Public 数据库，跳过查重: {exc}", file=sys.stderr)
         return titles
     for row in rows:
         props = row.get("properties", {})
@@ -2115,7 +2114,7 @@ _STATUS_OPTIONS = {"未开始", "进行中", "完成", "已丢弃"}
 
 
 def _map_status(status: str) -> str:
-    """把活动状态映射到 Notion hackathons 数据库的状态选项。"""
+    """把活动状态映射到 Notion Activities-Public 数据库的状态选项。"""
     s = (status or "").strip()
     if s in _STATUS_OPTIONS:
         return s
@@ -2181,12 +2180,12 @@ def build_event_children(ev: Event) -> list[dict]:
 
 
 def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
-    """把活动写入/更新到 Notion hackathons 数据库，返回 {归一化标题: 记录链接}。"""
+    """把活动写入/更新到 Notion Activities-Public 数据库，返回 {归一化标题: 记录链接}。"""
     urls: dict[str, str] = {}
     try:
         rows = query_database_rows(DB_HACKATHON_ID)
     except RuntimeError as exc:
-        print(f"[warn] 无法读取 Notion hackathons 数据库，跳过存档: {exc}", file=sys.stderr)
+        print(f"[warn] 无法读取 Notion Activities-Public 数据库，跳过存档: {exc}", file=sys.stderr)
         return urls
     by_norm: dict[str, dict] = {}
     for row in rows:
@@ -2285,7 +2284,7 @@ def upsert_notion_archive(date_str: str, events: list[Event]) -> dict[str, str]:
                 created += 1
         except RuntimeError as exc:
             print(f"[warn] 存档失败 {ev.title[:30]}: {exc}", file=sys.stderr)
-    print(f"[info] Notion 黑客松数据库：新增 {created} 条，更新 {updated} 条")
+    print(f"[info] Notion Activities-Public 数据库：新增 {created} 条，更新 {updated} 条")
     return urls
 
 
@@ -2305,7 +2304,7 @@ def _archive_row(page_id: str) -> None:
 
 
 def cleanup_archive(today: dt.date) -> int:
-    """按日报同标准清理黑客松库：删除非黑客松 / 过期超窗 / 纯海外 / 无关条目。"""
+    """按统一标准清理黑客松库：删除非黑客松 / 过期超窗 / 纯海外 / 无关条目。"""
     try:
         rows = query_database_rows(DB_HACKATHON_ID)
     except RuntimeError as exc:
@@ -2322,7 +2321,7 @@ def cleanup_archive(today: dt.date) -> int:
         snippet = "".join(t.get("plain_text", "") for t in props.get("摘要", {}).get("rich_text", []))
         ev = Event(title=title, snippet=snippet, location="")
         text = f"{title} {snippet}"
-        # 1) 与日报一致：必须是黑客松关键词命中且无排除特征（课程广告/回顾/招聘等）
+        # 1) 必须是黑客松关键词命中且无排除特征（课程广告/回顾/招聘等）
         if not is_relevant(ev):
             _archive_row(row["id"])
             pruned.append(normalize_title(title))
@@ -2390,180 +2389,6 @@ def _link_block(block_type: str, label: str, text: str, url: str) -> dict:
         "type": block_type,
         block_type: {"rich_text": rich},
     }
-
-
-def build_summary_children(date_str: str, events: list[Event], dup_idx: set[int] | None = None) -> list[dict]:
-    """构建当天汇总的 Notion 子块（直接写入数据库记录正文）。"""
-    dup_idx = dup_idx or set()
-    children: list[dict] = []
-    dup_count = len(dup_idx)
-    region_counts: dict[str, int] = {}
-    for ev in events:
-        region_counts[ev.region or "国内"] = region_counts.get(ev.region or "国内", 0) + 1
-    region_text = ""
-    if region_counts:
-        region_text = " 分组：" + " / ".join(
-            f"{k} {region_counts.get(k, 0)} 条" for k in ("国内", "国外", "线上") if region_counts.get(k)
-        ) + "。"
-    review_counts: dict[str, int] = {}
-    for ev in events:
-        if ev.review_status:
-            review_counts[ev.review_status] = review_counts.get(ev.review_status, 0) + 1
-    review_text = ""
-    if review_counts:
-        review_text = " 审核：" + "，".join(f"{k} {v} 条" for k, v in review_counts.items()) + "。"
-    verify_counts: dict[str, int] = {}
-    for ev in events:
-        if ev.verify_status:
-            verify_counts[ev.verify_status] = verify_counts.get(ev.verify_status, 0) + 1
-    verify_text = ""
-    if verify_counts:
-        verify_text = " 核对：" + "，".join(f"{k} {v} 条" for k, v in verify_counts.items()) + "。"
-    children.append(
-        _text_block(
-            "paragraph",
-            f"**概览**：共收录 {len(events)} 条活动，覆盖 {date_str} 起未来 30 天内的黑客松/编程马拉松信息。"
-            + (f"其中 {dup_count} 条与历史已收录信息重合（已标注）。" if dup_count else "")
-            + review_text
-            + verify_text
-            + region_text,
-        )
-    )
-    children.append(_text_block("heading_2", "活动总览"))
-    grouped: dict[str, list[tuple[int, Event]]] = {"国内": [], "国外": [], "线上": []}
-    for i, ev in enumerate(events, 1):
-        grouped.setdefault(ev.region or "国内", []).append((i, ev))
-    for region_name in ("国内", "国外", "线上"):
-        items = grouped.get(region_name, [])
-        if not items:
-            continue
-        children.append(_text_block("heading_2", f"{region_name}活动（{len(items)} 条）"))
-        for i, ev in items:
-            title = f"{i}. {ev.title}"
-            if i - 1 in dup_idx:
-                title += " ⚠️已收录"
-            children.append(_text_block("heading_3", title))
-            # 字段列表：固定顺序 + 统一占位，保证标准格式
-            for label, val in (
-                ("🏷️ 类型", ev.event_type),
-                ("🏢 主办方", ev.host),
-                ("📌 主题", ev.themes),
-                ("🏆 奖金", ev.prize),
-                ("👥 报名条件", ev.eligibility),
-                ("🌐 形式", ev.format),
-                ("🏷️ 标签", ev.tags),
-                ("🚦 状态", ev.status),
-            ):
-                if val:
-                    children.append(_labeled_block("bulleted_list_item", label, val))
-            children.append(_labeled_block("bulleted_list_item", "📝 报名时间", ev.signup_start or "待确认"))
-            children.append(_labeled_block("bulleted_list_item", "⏳ 报名截止", ev.signup_deadline or "待确认"))
-            children.append(_labeled_block("bulleted_list_item", "⏰ 竞赛时间", ev.competition_time or "待确认"))
-            children.append(_labeled_block("bulleted_list_item", "📍 地点", ev.location or "待确认"))
-            children.append(_labeled_block("bulleted_list_item", "摘要", ev.snippet[:180] if ev.snippet else "待确认"))
-            if ev.review_status:
-                review_line = ev.review_status
-                if ev.review_note:
-                    review_line += f"：{ev.review_note}"
-                children.append(_labeled_block("bulleted_list_item", "🔎 审核", review_line))
-            if ev.verify_status:
-                verify_line = ev.verify_status
-                if ev.verify_note:
-                    verify_line += f"：{ev.verify_note}"
-                children.append(_labeled_block("bulleted_list_item", "🔬 核对", verify_line))
-            if ev.official_url and ev.official_url != ev.url:
-                children.append(_link_block("bulleted_list_item", "✅ 官方链接", "查看详情", ev.official_url))
-            if ev.archive_url:
-                children.append(
-                    _link_block(
-                        "bulleted_list_item",
-                        "🗄️ 信息库",
-                        "打开对应记录",
-                        ev.archive_url,
-                    )
-                )
-            else:
-                children.append(_labeled_block("bulleted_list_item", "🗄️ 信息库", "未入库"))
-            if ev.url:
-                children.append(_link_block("bulleted_list_item", "🔗 链接", "查看详情", ev.url))
-            else:
-                children.append(_labeled_block("bulleted_list_item", "🔗 链接", "待确认"))
-    children.append(_text_block("heading_2", "说明"))
-    children.append(
-        _text_block(
-            "bulleted_list_item",
-            "⚠️ 时间、地点等字段由搜索引擎摘要自动提取，请以报名页面为准。",
-        )
-    )
-    children.append(
-        _text_block(
-            "bulleted_list_item",
-            "💡 点击来源链接可查看完整报名信息；无法判断日期的条目已保留供人工确认。",
-        )
-    )
-    if dup_count:
-        children.append(
-            _text_block(
-                "bulleted_list_item",
-                "⚠️ 标有'已收录'的活动与黑客松信息库中的历史条目重合，可能为同一活动或往期重复信息。",
-            )
-        )
-    return children
-
-
-def write_daily_summary(date_str: str, events: list[Event], dup_idx: set[int] | None = None) -> None:
-    """生成每日邮件正文摘要 data/daily_summary.md（供 send_email.py 发送）。"""
-    dup_idx = dup_idx or set()
-    region_counts: dict[str, int] = {}
-    for ev in events:
-        region_counts[ev.region or "国内"] = region_counts.get(ev.region or "国内", 0) + 1
-    region_text = " / ".join(
-        f"{k} {region_counts.get(k, 0)} 条" for k in ("国内", "国外", "线上") if region_counts.get(k)
-    )
-    lines = [
-        f"# {date_str} 黑客松活动汇总",
-        "",
-        f"共收录 {len(events)} 条活动（今天起未来 30 天内）"
-        + (f"，分组：{region_text}" if region_text else ""),
-        "",
-        "信息库页面：https://wenlinl.github.io/hackathon-daily/archive.html",
-        "",
-    ]
-    grouped: dict[str, list[tuple[int, Event]]] = {"国内": [], "国外": [], "线上": []}
-    for i, ev in enumerate(events, 1):
-        grouped.setdefault(ev.region or "国内", []).append((i, ev))
-    for region_name in ("国内", "国外", "线上"):
-        items = grouped.get(region_name, [])
-        if not items:
-            continue
-        lines.append(f"## {region_name}活动（{len(items)} 条）")
-        for i, ev in items:
-            tag = " ⚠️已收录" if i - 1 in dup_idx else ""
-            lines.append(f"### {i}. {ev.title}{tag}")
-            for label, val in (
-                ("主办方", ev.host),
-                ("主题", ev.themes),
-                ("奖金", ev.prize),
-                ("报名条件", ev.eligibility),
-                ("报名时间", ev.signup_start),
-                ("报名截止", ev.signup_deadline),
-                ("竞赛时间", ev.competition_time),
-                ("地点", ev.location),
-                ("形式", ev.format),
-                ("标签", ev.tags),
-                ("状态", ev.status),
-                ("审核", ev.review_status),
-                ("核对", ev.verify_status),
-            ):
-                if val:
-                    lines.append(f"- {label}：{val}")
-            if ev.url:
-                lines.append(f"- 链接：{ev.url}")
-            lines.append(f"- 信息库：{ev.archive_url or '未入库'}")
-            lines.append("")
-    summary_file = ARCHIVE_FILE.parent / "daily_summary.md"
-    summary_file.write_text("\n".join(lines), encoding="utf-8")
-    print(f"[info] 已生成邮件摘要 {summary_file}")
 
 
 def select_balanced(events: list[Event], limit: int = MAX_EVENTS) -> list[Event]:
@@ -2678,7 +2503,7 @@ def _resolve_archive_url(title: str, id_map: dict[str, str] | None = None) -> st
 
 
 def build_archive_html() -> None:
-    """根据服务器端信息库生成可浏览的 archive.html（每条目带锚点，供日报跳转）。"""
+    """根据服务器端信息库生成可浏览的 archive.html（每条目带锚点）。"""
     data = _load_archive()
     entries = data.get("entries", {})
     items = sorted(
@@ -2844,73 +2669,6 @@ def write_to_archive(date_str: str, events: list[Event]) -> None:
     print(f"[info] 信息库新增 {written} 条")
 
 
-def write_to_calendar(date_str: str, events: list[Event], dup_idx: set[int] | None = None) -> None:
-    """把当天汇总直接写入 2026 数据库（日历视图）当天记录，正文包含全部活动详情。"""
-    title_prop = "名称"  # 2026 数据库标题属性（已验证）
-    try:
-        existing = query_database_rows(DB_2026_ID)
-    except RuntimeError as exc:
-        print(f"[warn] 无法查询 2026 数据库，跳过日历写入: {exc}", file=sys.stderr)
-        return
-
-    existing_keys: set[tuple[str, str]] = set()
-    summary_ids: list[str] = []
-    for row in existing:
-        props = row.get("properties", {})
-        title = ""
-        date = ""
-        for p in props.values():
-            if p.get("type") == "title":
-                title = "".join(t.get("plain_text", "") for t in p.get("title", []))
-            if p.get("type") == "date" and p.get("date"):
-                date = p["date"].get("start", "")
-        if title and date:
-            existing_keys.add((title.strip(), date))
-        # 旧的“当天汇总”条目（含带/不带条数后缀），自动归档
-        if "黑客松活动汇总" in title:
-            summary_ids.append(row["id"])
-
-    title = f"{date_str} 黑客松活动汇总（{len(events)} 条）"
-    # 同日同标题已存在 → 直接跳过（避免把现有记录归档后又不重建）
-    if (title, date_str) in existing_keys:
-        print(f"[skip] 日历已存在: {title} @ {date_str}")
-        return
-
-    for pid in summary_ids:
-        try:
-            resp = requests.patch(
-                f"{NOTION_API}/pages/{pid}",
-                headers=notion_headers(),
-                json={"archived": True},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                print(f"[ok] 已归档旧汇总日历条目 {pid}")
-        except requests.RequestException as exc:
-            print(f"[warn] 归档旧条目失败 {pid}: {exc}", file=sys.stderr)
-
-    children = build_summary_children(date_str, events, dup_idx)
-    first_batch = children[:90]
-    rest = children[90:]
-    properties = {
-        title_prop: {
-            "title": [{"type": "text", "text": {"content": title}}]
-        },
-        "日期": {"date": {"start": date_str}},
-    }
-    try:
-        page = notion_create_page(
-            {"type": "database_id", "database_id": DB_2026_ID},
-            properties,
-            children=first_batch,
-        )
-        if rest:
-            notion_append_children(page["id"], rest)
-        print(f"[ok] 日历写入汇总（含正文）: {title} @ {date_str}")
-    except RuntimeError as exc:
-        print(f"[warn] 日历写入失败: {exc}", file=sys.stderr)
-
-
 def validate_config() -> None:
     if not NOTION_TOKEN:
         print("[error] 缺少环境变量 NOTION_TOKEN", file=sys.stderr)
@@ -3039,7 +2797,7 @@ def main() -> int:
             f"{ev.signup_deadline or '截止待确认'} | 日历:{ev.calendar_date}"
         )
 
-    # 查重：与 Notion hackathons 数据库 + 服务器端镜像中的历史条目比对
+    # 查重：与 Notion Activities-Public 数据库 + 服务器端镜像中的历史条目比对
     archive_titles = load_archive_titles() | notion_archive_titles()
     dup_idx = find_duplicates(selected, archive_titles)
     print(f"[info] 查重完成：{len(dup_idx)} 条与历史重合")
@@ -3056,18 +2814,25 @@ def main() -> int:
         return 0
 
     if not unique:
-        print("[info] 未来 30 天内没有搜到活动，仍然创建汇总页面")
+        print("[info] 未来 30 天内没有搜到活动，仅同步信息库")
 
-    # 存档：先写入/更新 Notion hackathons 数据库（拿到每条记录链接），再同步服务器端镜像
+    # 存档：先写入/更新 Notion Activities-Public 数据库（拿到每条记录链接），再同步服务器端镜像
     notion_urls = upsert_notion_archive(date_str, selected)
     for ev in selected:
         ev.archive_url = notion_urls.get(normalize_title(ev.title), "")
     write_to_archive(date_str, selected)
-    # 黑客松库与日报同标准清理：非黑客松/过期/纯海外直接归档
+    # 最终步骤：同步到飞书知识库（食刻Shike / public-Activity，可选）
+    try:
+        import feishu_sync
+
+        feishu_sync.sync_events(selected, source="每日收集")
+    except ImportError:
+        pass  # feishu_sync.py 不存在时静默跳过
+    except Exception as exc:  # noqa: BLE001 飞书失败不影响主流程
+        print(f"[warn] 飞书同步失败（不影响主流程）: {exc}", file=sys.stderr)
+    # 黑客松库统一清理：非黑客松/过期/纯海外直接归档
     removed = cleanup_archive(today)
-    print(f"[info] 黑客松库清理：删除 {removed} 条（按日报同标准）")
-    write_to_calendar(date_str, selected, dup_idx)
-    write_daily_summary(date_str, selected, dup_idx)
+    print(f"[info] 黑客松库清理：删除 {removed} 条（统一标准）")
     mark_manual_processed(selected)
     print("[done] 全部完成")
     return 0

@@ -2,7 +2,7 @@
 """微信转发消息 → 分析 → Notion 收录引擎。
 
 收到一条转发来的微信文章（标题/描述/链接、全文或长图），做 AI 字段提取与类型分类，
-写入 Notion Activities 数据库，并追加到当天的 Notion 黑客松日报。
+写入 Notion Activities-Public 数据库。
 手动转发内容视为用户已审核：不做真实性/时效性/地点拦截，一律收录。
 
 用法：
@@ -46,54 +46,6 @@ def _build_event(title: str, link: str, desc: str, text: str) -> collect.Event |
     return ev
 
 
-def _append_to_today_note(date_str: str, ev: collect.Event) -> None:
-    """把活动追加到当天 Notion 黑客松日报；当天没有日报则创建一条。"""
-    try:
-        rows = collect.query_database_rows(collect.DB_2026_ID)
-    except RuntimeError as exc:
-        print(f"[warn] 无法读取 2026 数据库，跳过日报写入: {exc}", file=sys.stderr)
-        return
-    page_id = ""
-    for row in rows:
-        props = row.get("properties", {})
-        title = "".join(t.get("plain_text", "") for t in props.get("名称", {}).get("title", []))
-        date = (props.get("日期", {}).get("date") or {}).get("start", "")
-        if "黑客松活动汇总" in title and date == date_str:
-            page_id = row["id"]
-            break
-    children = [collect._text_block("heading_3", ev.title)]
-    children.extend(collect.build_event_children(ev))
-    if page_id:
-        # 防重复：日报里已有同名活动则跳过追加（游标丢失重拉旧消息时避免重复）
-        existing_titles = set()
-        for block in collect.notion_get_children(page_id):
-            btype = block.get("type")
-            if btype == "heading_3":
-                txt = "".join(
-                    t.get("plain_text", "")
-                    for t in (block.get(btype) or {}).get("rich_text", [])
-                )
-                existing_titles.add(collect.normalize_title(txt))
-        if collect.normalize_title(ev.title) in existing_titles:
-            print(f"[info] 当天日报已包含「{ev.title[:30]}」，跳过追加")
-            return
-        collect.notion_append_children(page_id, children)
-        print(f"[ok] 已追加到当天日报 {page_id}")
-    else:
-        props = {
-            "名称": {"title": [{"type": "text", "text": {"content": f"{date_str} 黑客松活动汇总（手动）"}}]},
-            "日期": {"date": {"start": date_str}},
-        }
-        page = collect.notion_create_page(
-            {"type": "database_id", "database_id": collect.DB_2026_ID},
-            props,
-            children=children[:90],
-        )
-        if len(children) > 90:
-            collect.notion_append_children(page["id"], children[90:])
-        print(f"[ok] 已创建当天日报 {page.get('url')}")
-
-
 def ingest(
     title: str = "",
     link: str = "",
@@ -132,8 +84,17 @@ def ingest(
 
         urls = collect.upsert_notion_archive(date_str, [ev])
         ev.archive_url = urls.get(collect.normalize_title(ev.title), "")
-        _append_to_today_note(date_str, ev)
-        print("[done] 已收录到 Notion 黑客松数据库与当天日报")
+        print("[done] 已收录到 Notion Activities-Public 数据库")
+
+        # 最终步骤：同步到飞书知识库（食刻Shike / public-Activity，可选）
+        try:
+            import feishu_sync
+
+            feishu_sync.sync_events([ev], source="微信转发-手动收录")
+        except ImportError:
+            pass  # feishu_sync.py 不存在时静默跳过
+        except Exception as exc:  # noqa: BLE001 飞书失败不影响 Notion 主流程
+            print(f"[warn] 飞书同步失败（不影响主流程）: {exc}", file=sys.stderr)
         return {"ok": True, "title": ev.title, "message": f"已添加：{ev.title}"}
     except Exception as exc:  # noqa: BLE001
         print(f"[error] 收录失败: {exc}", file=sys.stderr)

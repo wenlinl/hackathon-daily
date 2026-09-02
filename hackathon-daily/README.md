@@ -6,12 +6,8 @@
 2. **AI 清洗与审核**（可选，需配置 LLM Key）：逐条判断是否为真实黑客松、是否近期开始、报名是否还来得及，并提取主办方/主题/奖金/报名条件等字段；未配置 Key 时自动降级为规则清洗；
 3. **AI 重新检索核对**（可选）：对每条活动做定向搜索→抓取候选官方页→**第二个 AI** 交叉核对（可用 `VERIFY_LLM_*` 配置独立模型），重点校正**报名时间/报名截止/竞赛时间**等字段，并标记核对状态（已核对/部分核对/信息冲突/未能核对）；
 4. **剔除纯海外活动**：只保留"国内"与"线上"（线上含海外举办的在线黑客松，均可参与），国外线下黑客松不收录；
-5. 与 **Notion hackathons 数据库**（含服务器端 `data/archive.json` 镜像）查重，重合条目标注"⚠️已收录"；新活动写入/更新到该数据库（每条活动一条记录），`archive.json` 仅作镜像备份；
+5. 与 **Notion Activities-Public 数据库**（含服务器端 `data/archive.json` 镜像）查重，重合条目标注"⚠️已收录"；新活动写入/更新到该数据库（每条活动一条记录），`archive.json` 仅作镜像备份；
 6. 整理成摘要列表（活动名称、主办方、主题、奖金、报名条件、报名/截止/竞赛时间、地点、形式、状态、标签、来源链接、审核与核对状态），并**按 国内 / 线上 分组**（纯海外已剔除）；
-7. 写入 Notion：直接在 **2026 数据库（日历视图）** 中创建当天的一条记录
-   （标题：`YYYY-MM-DD 黑客松活动汇总（N 条）`，日期=当天），
-   记录的正文包含全部活动详情（报名时间、报名截止、竞赛时间、地点、摘要、来源链接、审核状态）。
-8. **发送日报邮件**：把当天摘要通过 SMTP 发到指定邮箱（默认 `aresleng@sina.com`；发件邮箱为 `lengwenlin@163.com`；未配置 SMTP 时跳过）。
 
 ## 信息核对标准（创建每条信息时核对）
 
@@ -60,27 +56,19 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 | `DEEPSEEK_API_KEY`（或 `LLM_API_KEY`） | 可选：AI 清洗/审核用的 LLM API Key（DeepSeek/OpenAI 兼容） |
 | `LLM_BASE_URL` / `LLM_MODEL` | 可选：自定义模型地址与模型名（默认 DeepSeek） |
 | `VERIFY_LLM_API_KEY` / `VERIFY_LLM_BASE_URL` / `VERIFY_LLM_MODEL` | 可选：核对阶段用的"第二个 AI"（不配置则沿用主 AI） |
-| `SMTP_HOST` | 可选：SMTP 服务器（当前为 `smtp.office365.com`，Outlook），配置后每天发送日报邮件 |
-| `SMTP_PORT` | 可选：当前 `587`（STARTTLS） |
-| `SMTP_USER` / `SMTP_PASSWORD` | 可选：发件邮箱账号（`lengwenlin@outlook.com`）与密码/应用专用密码 |
-| `EMAIL_TO`（Variables） | 可选：收件人，默认 `aresleng@sina.com` |
-
-邮件正文取自 `data/daily_summary.md`（运行中生成，不入库），内容与日报一致：按国内/国外/线上分组，含时间、地点、链接与信息库跳转。
-
 ## 黑客松存档数据库（Notion）
 
-- 数据库：Notion **hackathons** 数据库（`3bb60e0b-0bbf-8179-aa88-d98a77a635ef`），每条活动一条记录
+- 数据库：Notion **Activities-Public** 数据库（`3cc60e0b-0bbf-80de-8337-fc2d3a856c34`），每条活动一条记录
 - 属性：名称(title)、日期(date)、报名截止(date)、地点(rich_text)、来源链接(url)、摘要(rich_text)、状态(status)
 - 每次运行：已存在的活动**更新**记录（刷新时间/地点/链接/摘要/状态），新活动**新增**记录
-- **库与日报同标准清理**：非黑客松（课程广告/招聘/回顾等）、过期超窗、纯海外的记录自动归档（软删除），镜像 `archive.json` 同步裁剪
+- **库按统一标准清理**：非黑客松（课程广告/招聘/回顾等）、过期超窗、纯海外的记录自动归档（软删除），镜像 `archive.json` 同步裁剪
 - 每条记录的 **note 正文**包含该活动的详细内容（主办方、主题、奖金、报名条件、报名/截止/竞赛时间、地点、审核/核对状态、官方与来源链接）
 - AI 核对优先处理**缺少报名截止时间**的活动，尽量从官方来源补全截止日期；仅有估算值时写入摘要标注"报名截止（约）"
-- 日报中每条活动带 **"🗄️ 信息库 → 打开对应记录"** 链接，直接跳到该活动在 Notion 数据库中的记录，实现一一对应
 - `data/archive.json` 保留为服务器端镜像（查重/备份），不再生成网站页面
 
 ## 手动补充微信文章全文
 
-微信正文无法稳定自动抓取时，可以把文章**标题 + 正文全文 + 链接**直接发给助手，助手会写入 `hackathon-daily/manual/articles.json`；下次运行自动并入当天日报和信息库，AI 会从中提取截止时间/地点/主办方等字段。也可以自己按此格式追加：
+微信正文无法稳定自动抓取时，可以把文章**标题 + 正文全文 + 链接**直接发给助手，助手会写入 `hackathon-daily/manual/articles.json`；下次运行自动并入信息库，AI 会从中提取截止时间/地点/主办方等字段。也可以自己按此格式追加：
 
 ```json
 {
@@ -105,18 +93,55 @@ Devpost、Luma、TAIKAI、HackerEarth、DoraHacks、天池、AI Studio、掘金�
 功能：
 
 - **微信回执**：转发处理完成后，微信客服会话会收到回复——成功时"已添加：{名称}"，失败/未收录时回复具体原因。
-- **AI 详细介绍**：每条写入 Notion hackathons 数据库的 note 会附带 AI 生成的中文详细介绍（400-600 字，覆盖背景/主题/赛制/时间地点/奖项/报名方式）。
+- **AI 详细介绍**：每条写入 Notion Activities-Public 数据库的 note 会附带 AI 生成的中文详细介绍（400-600 字，覆盖背景/主题/赛制/时间地点/奖项/报名方式）。
 - **图片/长图识别**：直接把公众号文章长截图发到客服会话，接收端下载图片 → 视觉模型（火山方舟 doubao，`VISION_API_KEY` 等环境变量）提取全文 → 走同一套 AI 分析入库流程。
 - **合并回执**：企微限制 48 小时内最多回复 5 条/客户，回执按批次合并（8 秒窗口内的事件汇总成一条），避免被限流（errcode 95001）。
-- **活动类型**：数据库名为 **Activities**，含"类型"字段（select：黑客松/创投路演/竞赛/峰会/其他，AI 自动判断）；也支持创投、路演等活动，AI 会提取官方/申请链接填入 note 的"官方链接"。
+- **活动类型**：数据库名为 **Activities-Public**，含"类型"字段（select：黑客松/创投路演/竞赛/峰会/其他，AI 自动判断）；也支持创投、路演等活动，AI 会提取官方/申请链接填入 note 的"官方链接"。
 - **原始素材**：每条 note 末尾附"📎 原始素材"区——转发的是链接就放链接块；转发的是图片就自动上传到仓库 `docs/images/`（需 `GITHUB_TOKEN` 环境变量）并以图片块展示。
+
+## 飞书知识库同步（可选最终步骤）
+
+收录条目写入 Notion Activities-Public 后，可**同步写入飞书知识库**（默认知识库「食刻Shike」→ 目标节点「public-Activity」），实现 Notion + 飞书双端存档：
+
+- 目标节点是**文档**：在 public-Activity 节点下为每条活动新建一个子文档（标题 + 字段 + 摘要 + 链接，自动去重）；
+- 目标节点是**多维表格**：向表格追加一条记录（自动映射"名称/标题"“摘要”“链接”等字段，取第一张表，可用 `FEISHU_BITABLE_TABLE_ID` 指定）；
+- 未配置凭据时自动跳过，不影响 Notion 主流程；单条同步失败只告警不中断。
+
+配置（环境变量）：
+
+| 变量 | 说明 |
+| --- | --- |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书自建应用的凭据（必填才启用） |
+| `FEISHU_WIKI_SPACE_ID` | 可选，显式指定知识库 ID（不填按名称自动查找「食刻Shike」） |
+| `FEISHU_WIKI_NODE_TOKEN` | 可选，显式指定目标节点 token（不填按名称自动查找「public-Activity」） |
+| `FEISHU_BITABLE_TABLE_ID` | 可选，目标为多维表格时指定表 ID |
+| `FEISHU_SPACE_TITLE` / `FEISHU_TARGET_TITLE` | 可选，自定义知识库/节点名称 |
+
+飞书自建应用需开通权限：`wiki:wiki:readonly`（查看知识库）、`wiki:wiki`（创建节点）、`docx:document`（读写文档）、`bitable:app`（读写多维表格，目标为表格时需要）。把知识库「食刻Shike」和对应文档/表格授权给该应用后，可用下面命令自检：
+
+```bash
+FEISHU_APP_ID=... FEISHU_APP_SECRET=... python src/feishu_sync.py --check
+```
+
+本地运行时会自动读取 `hackathon-daily/.env` 里的 `FEISHU_*` 变量（已 gitignore，不提交）。本项目实际配置：
+
+```bash
+FEISHU_APP_ID=...            # 复用「食刻Shike」项目的飞书自建应用（ChatGPT/Shike/tools/feishu-wiki/.env）
+FEISHU_APP_SECRET=...
+FEISHU_WIKI_SPACE_ID=7677477613996149948     # 知识库「食刻Shike」
+FEISHU_WIKI_NODE_TOKEN=FpxFwBLlOisZuSkMnmLcJsfZnNd   # 「规划与执行 → Activities-Public」
+FEISHU_TARGET_TITLE=Activities-Public
+FEISHU_BITABLE_TABLE_ID=tblvMdPOD88KDy27     # 数据表「Activities」
+```
+
+同步目标：`食刻Shike → 规划与执行 → Activities-Public（多维表格）→ Activities`。已有条目按"名称"归一化去重，重复转发不会重复写入；`feishu_sync.py --check` 会回显节点类型（bitable/docx）以便确认目标形态。
 
 1. 注册企业微信（免费），创建**自建应用**，拿到 `corpId` / `Secret` / `AgentId`；
 2. 把接收端部署到公网（见下），拿到形如 `https://xxx/wecom` 的真实地址；
 3. 在自建应用里配置**接收消息服务器**：URL 填该地址，并生成 `Token` 和 `EncodingAESKey`（保存时企微会发验证请求，必须能正常回显才通过）；
 4. 把自建应用通过**微信插件**加到你的微信联系人，置顶；
 5. 以后在公众号看到有用黑客松，直接**转发给该联系人**；
-6. 接收端收到 link 消息 → `src/ingest.py` 用 AI 提取字段 → 写入 Notion 黑客松数据库 + 当天日报。
+6. 接收端收到 link 消息 → `src/ingest.py` 用 AI 提取字段 → 写入 Notion Activities-Public 数据库。
 
 > ⚠️ 回调 URL 必须指向**你自己的、正在运行接收端的公网服务**，不能填一个没有服务的域名。
 > 企微保存时会对 URL 发 GET 验证（带 `echostr`），接收端解密回显后才算通过；
