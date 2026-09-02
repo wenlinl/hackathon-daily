@@ -507,12 +507,14 @@ def _bitable_existing_titles(
     return titles
 
 
-def _bitable_add_record(app_token: str, table_id: str, fields: dict[str, Any]) -> None:
-    _api(
+def _bitable_add_record(app_token: str, table_id: str, fields: dict[str, Any]) -> dict:
+    """新建飞书表格记录，返回创建的 record（含 record_id）。"""
+    data = _api(
         "POST",
         f"/bitable/v1/apps/{app_token}/tables/{table_id}/records",
         payload={"fields": fields},
     )
+    return data.get("record") or {}
 
 
 _ATTACHMENT_KEYWORDS = ("附件", "素材", "文件", "图片", "材料", "attachment", "file", "image", "img")
@@ -670,16 +672,24 @@ def sync_event(ev: Any, source: str = "", today: str = "") -> str:
         fields = _bitable_fields(meta, ev, today=today)
         att_field = _pick_attachment_field(meta)
         src_url = getattr(ev, "source_image_url", "") or ""
+        uploaded: dict | None = None
         if att_field and src_url:
             try:
                 filename = _filename_from_url(src_url)
                 file_bytes = _download_bytes(src_url)
                 token = _upload_bitable_file(obj_token, file_bytes, filename)
-                fields[att_field] = [{"file_token": token, "name": filename}]
+                uploaded = {"file_token": token, "name": filename}
                 print(f"[info] 原始素材已上传飞书附件：{filename[:80]}")
             except Exception as exc:  # noqa: BLE001 素材上传失败不影响记录入库
                 print(f"[warn] 原始素材上传失败（不影响入库）: {exc}", file=sys.stderr)
-        _bitable_add_record(obj_token, table_id, fields)
+        record = _bitable_add_record(obj_token, table_id, fields)
+        if uploaded and record.get("record_id"):
+            _api(
+                "PUT",
+                f"/bitable/v1/apps/{obj_token}/tables/{table_id}/records/{record['record_id']}",
+                payload={"fields": {att_field: [uploaded]}},
+            )
+            print(f"[ok] 附件已挂到新记录 {record['record_id']}")
         print(f"[info] 已写入飞书多维表格：{title[:40]}（{source or '手动收录'}）")
         return f"https://feishu.cn/base/{obj_token}"
 
