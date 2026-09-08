@@ -1,18 +1,18 @@
-name: stock-daily
+name: sector-scan
 
 on:
   schedule:
-    # 北京时间每个交易日 18:00（盘后，龙虎榜已披露）= UTC 10:00，周一至周五
-    - cron: "0 10 * * 1-5"
+    # 北京时间每个交易日 16:00（15:00 收盘后）= UTC 08:00，周一至周五
+    - cron: "0 8 * * 1-5"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  collect:
+  scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -25,15 +25,14 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r stock-daily/requirements.txt
 
-      - name: Run stock daily collection
+      - name: Run sector scan
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          HITHINK_FINANCE_API_KEY: ${{ secrets.HITHINK_FINANCE_API_KEY }}
-        run: python stock-daily/src/collect.py
+        run: python stock-daily/src/sector_scan.py
 
       - name: Summary
         if: always()
         run: |
-          echo "## Stock Daily Run" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Sector Scan Run" >> "$GITHUB_STEP_SUMMARY"
           echo "See workflow logs for details." >> "$GITHUB_STEP_SUMMARY"
