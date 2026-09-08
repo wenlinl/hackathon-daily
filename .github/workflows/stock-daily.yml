@@ -2,8 +2,8 @@ name: stock-daily
 
 on:
   schedule:
-    # 北京时间每个交易日 18:00（盘后，龙虎榜已披露）= UTC 10:00，周一至周五
-    - cron: "0 10 * * 1-5"
+    # 北京时间每个交易日 16:00（15:00 收盘后）= UTC 08:00，周一至周五
+    - cron: "0 8 * * 1-5"
   workflow_dispatch:
 
 permissions:
