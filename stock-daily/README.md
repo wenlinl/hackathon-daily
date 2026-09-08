@@ -67,3 +67,36 @@ python3 src/collect.py                    # 采集并写入 Notion
 - 龙虎榜为盘后披露（约 17:00 后）；若在盘后运行仍为空，会回退到最近一个有效交易日。
 - 定时任务按周一至周五（北京时间 18:00 = UTC 10:00）触发；法定节假日运行会取最近交易日数据。
 - 数据仅供研究参考，不构成投资建议。
+
+## 板块扫描（sector_scan.py）
+
+在每日复盘之外，`src/sector_scan.py` 每天从全量行业+概念板块里，按
+[docs/sector-workflow.md](docs/sector-workflow.md) 的流程筛选"低位启动 + 资金异动"候选：
+
+1. 拉取大盘环境（指数 20 日线、量能、涨跌停/炸板率）并给出仓位上限参考；
+2. 全量板块快照预筛（涨幅/成交额/量比/60 日涨幅/合成板块过滤）；
+3. 逐板块拉资金流日线，计算距一年高点回撤、5/20/60 日涨幅、主力连续净流入天数；
+4. 四维打分（位置/量价/资金/拥挤度 各 0–2 分，满分 8），总分 ≥4 进候选榜；
+5. 输出候选榜、入选理由、与昨日对比、排除说明、待人工逻辑体检，并写入 Notion
+   当天页面（标题 `YYYY-MM-DD 板块扫描候选`，与复盘记录同一日历数据库）。
+
+运行方式：
+
+```bash
+python3 src/sector_scan.py --dry-run            # 只采集打印
+python3 src/sector_scan.py                      # 写本地历史并写 Notion（需 NOTION_TOKEN）
+python3 src/sector_scan.py --min-score 5 --top 15
+python3 src/sector_scan.py --max-boards 40      # 控制逐板块请求量
+python3 src/sector_scan.py --json               # 仅输出候选 JSON
+```
+
+说明：
+
+- 数据源为东方财富公开接口（无需 Key）。东财对连续请求限流较严，脚本内置分页、
+  请求间隔随机抖动、连续失败冷却；首次运行约 3–6 分钟，之后本地运行会复用
+  `data/board_cache.json` 只做增量更新。
+- 机器分不含"逻辑"维度——催化是否可持续、利好能否落到利润，仍需按报告里的
+  "待人工逻辑体检"清单自行判断。
+- "与昨日对比"依赖本地 `data/scan_history.json`。GitHub Actions 每次全新环境、
+  不持久化该文件，因此对比仅在本地连续运行时有效；如需在云端保留跨日状态可再扩展。
+- `data/` 目录已在 `.gitignore` 中，本地状态不提交到仓库。
