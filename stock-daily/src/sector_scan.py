@@ -73,9 +73,10 @@ LOCAL_GAP = 2.0           # 逐板块请求基础间隔（秒）
 LOCAL_JITTER = 0.8        # 间隔随机抖动上限（秒），避免规律性请求触发限流
 COOLDOWN_FAILS = 5        # 连续失败达到该值后冷却一次
 COOLDOWN_SECS = 30        # 冷却时长（秒）
-PRE_PCT_MAX = 6.0         # 预筛：当日涨幅上限（%），>7% 视为单日过热
+PRE_PCT_RANGE = (-1.5, 6.0)  # 预筛：当日涨幅区间（%），允许小幅回调日
 PRE_VR_RANGE = (0.8, 3.0)  # 预筛：快照量比区间
 PRE_R60_RANGE = (-0.45, 0.35)  # 预筛：快照 60 日涨幅区间（过滤长阴跌与高位）
+PRE_R5_MIN = 0.5          # 预筛：当日下跌时，要求 5 日总体涨幅 >=0.5%
 PRE_POOL_CAP = 60         # 进入逐板块历史请求的最大数量
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 FLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
@@ -108,6 +109,7 @@ class Board:
     amount: float = 0.0
     vr: float | None = None
     r60_snap: float | None = None  # 快照自带 60 日涨幅（预筛用）
+    r5_snap: float | None = None   # 快照自带 5 日涨幅（预筛用）
     drawdown: float | None = None
     r5: float | None = None
     r20: float | None = None
@@ -236,7 +238,7 @@ def _fetch_board_snapshot(kind: str, fid: str, extra_fields: str) -> list[dict]:
                     "invt": 2,
                     "fid": fid,
                     "fs": f"m:90+t:{t}",
-                    "fields": f"f12,f14,f3,f6,f10,f24{extra_fields}",
+                    "fields": f"f12,f14,f3,f6,f10,f24,f109{extra_fields}",
                 },
             )
             d = (data or {}).get("data") or {}
@@ -271,6 +273,7 @@ def fetch_all_boards() -> dict[str, Board]:
                 amount=float(d.get("f6") or 0),
                 vr=_num(d.get("f10")),
                 r60_snap=_num(d.get("f24")),
+                r5_snap=_num(d.get("f109")),
             )
         time.sleep(REQUEST_GAP)
         for d in _fetch_board_snapshot(kind, "f62", ",f62"):
@@ -418,6 +421,9 @@ def classify(b: Board) -> str:
         return "无历史数据"
     if (b.r20 or 0) <= -0.15:
         return "下降趋势未扭转"
+    # 短期趋势：当日/5日/20日 三者不能全为负（不苛求当天上涨）
+    if b.pct <= 0 and (b.r5 or -99) <= 0 and (b.r20 or -99) <= 0:
+        return "短期无上涨"
     if b.drawdown > -POS_MID and (b.r20 or 0) >= CROWD_R20_HOT and (b.vr or 0) >= 3.0:
         return "高位加速"
     if b.pct >= 7.0 and (b.vr or 0) >= CROWD_VR_HOT:
@@ -843,11 +849,14 @@ def scan(min_score: int, max_boards: int) -> tuple[Report, list[dict], dict]:
     # 大幅减少后续逐板块历史数据请求量。
     pool_a: list[Board] = []
     for b in boards.values():
-        if not (0 < b.pct <= PRE_PCT_MAX):
+        if not (PRE_PCT_RANGE[0] <= b.pct <= PRE_PCT_RANGE[1]):
             continue
         if b.amount < MIN_AMOUNT:
             continue
         if any(x in b.name for x in DENY_NAMES):
+            continue
+        # 当日不要求必须上涨：当日收跌时，看 5 日总体涨幅是否仍为正
+        if b.pct <= 0 and (b.r5_snap is None or b.r5_snap < PRE_R5_MIN):
             continue
         if b.r60_snap is not None and not (
             PRE_R60_RANGE[0] <= b.r60_snap <= PRE_R60_RANGE[1]
@@ -891,7 +900,7 @@ def scan(min_score: int, max_boards: int) -> tuple[Report, list[dict], dict]:
         reason = classify(b)
         if reason:
             b.excluded = reason
-            if reason not in ("形态未达标", "下降趋势未扭转") and len(r.excluded_examples) < 6:
+            if reason not in ("形态未达标", "下降趋势未扭转", "短期无上涨") and len(r.excluded_examples) < 6:
                 r.excluded_examples.append((b.name, b.kind, reason))
             time.sleep(gap)
             continue
