@@ -222,13 +222,13 @@ def _secid_board(code: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _fetch_board_snapshot(kind: str, fid: str, extra_fields: str) -> list[dict]:
-    """按页拉取某类板块的全量快照（clist 单页最多返回 100 条）。"""
+    """拉取某类板块的全量快照；主入口缺页时用延时镜像补齐并合并去重。"""
     t = "2" if kind == "行业" else "3"
+    merged: dict[str, dict] = {}
+    total = 0
     for base in QUOTE_APIS:
-        out: list[dict] = []
         for pn in range(1, 13):
             diff: list = []
-            total = 0
             for attempt in range(3):
                 data = _try_json_once(
                     f"{base}/clist/get",
@@ -248,18 +248,26 @@ def _fetch_board_snapshot(kind: str, fid: str, extra_fields: str) -> list[dict]:
                 diff = d.get("diff") or []
                 if isinstance(diff, dict):
                     diff = list(diff.values())
-                total = int(d.get("total") or 0)
                 if diff:
+                    total = max(total, int(d.get("total") or 0))
                     break
                 time.sleep(1.2 * (attempt + 1))
-            out.extend(diff)
-            if not diff or len(out) >= total:
+            for item in diff:
+                code = str(item.get("f12") or "")
+                if code:
+                    merged[code] = item
+            if len(merged) >= total:
                 break
             time.sleep(0.3)
-        if out:
-            return out
+        if merged and len(merged) >= total:
+            break
         time.sleep(1.0)
-    return []
+    # 与入口顺序无关，统一按当日涨幅降序（供后续截断使用）
+    return sorted(
+        merged.values(),
+        key=lambda x: float(x.get("f3") or -999),
+        reverse=True,
+    )
 
 
 def fetch_all_boards() -> dict[str, Board]:
