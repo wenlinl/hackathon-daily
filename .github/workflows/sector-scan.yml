@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   scan:
@@ -15,6 +16,15 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore sector scan state
+        id: state
+        uses: actions/cache/restore@v4
+        with:
+          path: stock-daily/data
+          key: sector-scan-state-${{ github.run_id }}
+          restore-keys: |
+            sector-scan-state-
 
       - uses: actions/setup-python@v5
         with:
@@ -30,6 +40,12 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: python stock-daily/src/sector_scan.py
+
+      - name: Save sector scan state
+        uses: actions/cache/save@v4
+        with:
+          path: stock-daily/data
+          key: sector-scan-state-${{ github.run_id }}
 
       - name: Summary
         if: always()

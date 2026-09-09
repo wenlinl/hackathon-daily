@@ -227,26 +227,32 @@ def _fetch_board_snapshot(kind: str, fid: str, extra_fields: str) -> list[dict]:
     for base in QUOTE_APIS:
         out: list[dict] = []
         for pn in range(1, 13):
-            data = _try_json_once(
-                f"{base}/clist/get",
-                {
-                    "pn": pn,
-                    "pz": 100,
-                    "po": 1,
-                    "np": 1,
-                    "fltt": 2,
-                    "invt": 2,
-                    "fid": fid,
-                    "fs": f"m:90+t:{t}",
-                    "fields": f"f12,f14,f3,f6,f10,f24,f109{extra_fields}",
-                },
-            )
-            d = (data or {}).get("data") or {}
-            diff = d.get("diff") or []
-            if isinstance(diff, dict):
-                diff = list(diff.values())
+            diff: list = []
+            total = 0
+            for attempt in range(3):
+                data = _try_json_once(
+                    f"{base}/clist/get",
+                    {
+                        "pn": pn,
+                        "pz": 100,
+                        "po": 1,
+                        "np": 1,
+                        "fltt": 2,
+                        "invt": 2,
+                        "fid": fid,
+                        "fs": f"m:90+t:{t}",
+                        "fields": f"f12,f14,f3,f6,f10,f24,f109{extra_fields}",
+                    },
+                )
+                d = (data or {}).get("data") or {}
+                diff = d.get("diff") or []
+                if isinstance(diff, dict):
+                    diff = list(diff.values())
+                total = int(d.get("total") or 0)
+                if diff:
+                    break
+                time.sleep(1.2 * (attempt + 1))
             out.extend(diff)
-            total = int(d.get("total") or 0)
             if not diff or len(out) >= total:
                 break
             time.sleep(0.3)
@@ -345,7 +351,15 @@ def fetch_board_history(b: Board, cache: dict, trade_date: str) -> bool:
     if isinstance(cached, dict):
         raw_rows = cached.get("rows") or []
         rows = [(r[0], r[1], r[2], r[3]) for r in raw_rows if len(r) >= 4]
-    lmt = 12 if rows and cached.get("updated") == trade_date else HISTORY_DAYS
+    lmt = HISTORY_DAYS
+    if rows:
+        try:
+            last_date = datetime.strptime(rows[-1][0], "%Y-%m-%d").date()
+            target = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            if 0 <= (target - last_date).days <= 20:
+                lmt = 20  # 缓存较新：只补最近 20 根，覆盖周末与长假
+        except (ValueError, IndexError):
+            pass
     params = {
         "lmt": lmt,
         "klt": 101,
@@ -353,11 +367,18 @@ def fetch_board_history(b: Board, cache: dict, trade_date: str) -> bool:
         "fields1": "f1,f2,f3,f7",
         "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
     }
-    data = _try_json_once(FLOW_URL, params)
-    fresh = _parse_history(data)
+    fresh: list = []
+    for attempt in range(3):
+        fresh = _parse_history(_try_json_once(FLOW_URL, params))
+        if fresh:
+            break
+        time.sleep(1.5 * (attempt + 1))
     if not fresh:
         # 主入口被限流时降级到延时入口（仅返回当日一行，需配合缓存）
         fresh = _parse_history(_try_json_once(FLOW_DELAY_URL, params))
+        if not fresh:
+            time.sleep(2.0)
+            fresh = _parse_history(_try_json_once(FLOW_DELAY_URL, params))
     if not fresh and not rows:
         return False
     merged = _merge_rows(rows, fresh)
@@ -440,19 +461,24 @@ def classify(b: Board) -> str:
 # ---------------------------------------------------------------------------
 
 def fetch_index_kline(secid: str, lmt: int = 40) -> list[dict]:
-    data = _try_json_once(
-        KLINE_URL,
-        {
-            "secid": secid,
-            "klt": 101,
-            "fqt": 1,
-            "lmt": lmt,
-            "end": "20500101",
-            "fields1": "f1,f2,f3,f4,f5,f6",
-            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
-        },
-    )
-    return _parse_klines(data)
+    for attempt in range(3):
+        data = _try_json_once(
+            KLINE_URL,
+            {
+                "secid": secid,
+                "klt": 101,
+                "fqt": 1,
+                "lmt": lmt,
+                "end": "20500101",
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+            },
+        )
+        bars = _parse_klines(data)
+        if bars:
+            return bars
+        time.sleep(1.5 * (attempt + 1))
+    return []
 
 
 def fetch_trade_mood() -> tuple[str, int, int, int]:
