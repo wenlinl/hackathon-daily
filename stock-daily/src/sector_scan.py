@@ -78,6 +78,8 @@ PRE_VR_RANGE = (0.8, 3.0)  # 预筛：快照量比区间
 PRE_R60_RANGE = (-0.45, 0.35)  # 预筛：快照 60 日涨幅区间（过滤长阴跌与高位）
 PRE_R5_MIN = 0.5          # 预筛：当日下跌时，要求 5 日总体涨幅 >=0.5%
 PRE_POOL_CAP = 60         # 进入逐板块历史请求的最大数量
+LEADERS_TOP_N = 6         # 为前 N 个候选拉取板块内领涨个股
+LEADER_COUNT = 5          # 每个板块展示的领涨个股数量
 KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 FLOW_URL = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
 FLOW_DELAY_URL = "https://push2delay.eastmoney.com/api/qt/stock/fflow/daykline/get"
@@ -116,6 +118,7 @@ class Board:
     r60: float | None = None
     consec_up: int = 0
     main_flow: float | None = None
+    main_pct: float | None = None  # 主力净占比（%）
     consec_inflow: int = 0
     pos_s: int = 0
     vp_s: int = 0
@@ -131,6 +134,7 @@ class Env:
     regime: str = "中性"
     cap: str = "中"
     detail: list[str] = field(default_factory=list)
+    summary: str = ""
 
 
 @dataclass
@@ -141,9 +145,12 @@ class Report:
     passed: int = 0
     stage_counts: dict = field(default_factory=dict)
     excluded_examples: list[tuple[str, str, str]] = field(default_factory=list)
+    excl_stats: dict = field(default_factory=dict)
+    leaders: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
     new_in: list[Board] = field(default_factory=list)
     still_in: list[Board] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
+    prev: dict = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     hist_failed: int = 0
 
@@ -290,13 +297,44 @@ def fetch_all_boards() -> dict[str, Board]:
                 r5_snap=_num(d.get("f109")),
             )
         time.sleep(REQUEST_GAP)
-        for d in _fetch_board_snapshot(kind, "f62", ",f62"):
+        for d in _fetch_board_snapshot(kind, "f62", ",f62,f184"):
             code = str(d.get("f12") or "")
             b = boards.get(code)
             if b:
                 b.main_flow = d.get("f62")
+                b.main_pct = _num(d.get("f184"))
         time.sleep(REQUEST_GAP)
     return boards
+
+
+def fetch_board_leaders(b: Board, count: int = LEADER_COUNT) -> list[tuple[str, float]]:
+    """拉取板块内按当日涨幅排序的领涨个股。"""
+    for base in QUOTE_APIS:
+        data = _try_json_once(
+            f"{base}/clist/get",
+            {
+                "pn": 1,
+                "pz": count,
+                "po": 1,
+                "np": 1,
+                "fltt": 2,
+                "invt": 2,
+                "fid": "f3",
+                "fs": f"b:{b.code}",
+                "fields": "f12,f14,f3",
+            },
+        )
+        diff = (data or {}).get("data") or {}
+        diff = diff.get("diff") or []
+        if isinstance(diff, dict):
+            diff = list(diff.values())
+        if diff:
+            return [
+                (str(d.get("f14") or ""), float(d.get("f3") or 0))
+                for d in diff
+                if d.get("f14")
+            ]
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -588,8 +626,21 @@ def fetch_env() -> tuple[Env, str]:
         last_close = sh_bars[-1]["close"]
         if ma20:
             trend_up = last_close >= ma20
+            r5_sh = last_close / sh_bars[-6]["close"] - 1
+            dev = last_close / ma20 - 1
             env.detail.append(
-                f"上证 {_fmt(last_close)}，20日线 {_fmt(ma20)}（{'上方' if trend_up else '下方'}）"
+                f"上证 {_fmt(last_close)}，5日 {_fmt_pct(r5_sh)}，20日线 {_fmt(ma20)}，"
+                f"偏离 {_fmt_pct(dev)}（{'上方' if trend_up else '下方'}）"
+            )
+    if len(sz_bars) >= 20:
+        ma20_sz = _mean([x["close"] for x in sz_bars[-20:]])
+        if ma20_sz:
+            last_sz = sz_bars[-1]["close"]
+            r5_sz = last_sz / sz_bars[-6]["close"] - 1
+            dev_sz = last_sz / ma20_sz - 1
+            env.detail.append(
+                f"深成指 {_fmt(last_sz)}，5日 {_fmt_pct(r5_sz)}，20日线 {_fmt(ma20_sz)}，"
+                f"偏离 {_fmt_pct(dev_sz)}（{'上方' if dev_sz >= 0 else '下方'}）"
             )
 
     vol_ok = None
@@ -604,15 +655,18 @@ def fetch_env() -> tuple[Env, str]:
     if today_total and avg5:
         vol_ok = today_total >= avg5
         delta = today_total / avg5 - 1
+        vol_word = "放量" if delta >= 0.05 else ("缩量" if delta <= -0.05 else "量能平稳")
         env.detail.append(
-            f"两市成交 {_fmt_yi(today_total)}，较5日均量 {_fmt_pct(delta)}"
+            f"两市成交 {_fmt_yi(today_total)}，较5日均量 {_fmt_pct(delta)}（{vol_word}）"
         )
 
     breadth = fetch_breadth_fb()
     up = sum(x.up for x in breadth)
     down = sum(x.down for x in breadth)
     if up or down:
-        env.detail.append(f"涨跌家数：上涨 {up} / 下跌 {down}")
+        ratio = up / (up + down)
+        mood_word = "普涨" if ratio >= 0.6 else ("普跌" if ratio <= 0.4 else "分化")
+        env.detail.append(f"涨跌家数：上涨 {up} / 下跌 {down}（{mood_word}，{ratio*100:.1f}%上涨）")
 
     trade_date, zt, dt, zb = fetch_trade_mood()
     zb_ratio = zb / (zt + zb) if (zt + zb) > 0 else None
@@ -631,6 +685,27 @@ def fetch_env() -> tuple[Env, str]:
         env.regime, env.cap = "防御", "低"
     else:
         env.regime, env.cap = "中性", "中"
+
+    # 环境解读
+    parts: list[str] = []
+    if trend_up is None:
+        parts.append("指数趋势数据缺失")
+    else:
+        parts.append("上证" + ("站上" if trend_up else "跌破") + "20日线")
+    if vol_ok is None:
+        parts.append("量能数据缺失")
+    else:
+        parts.append("两市成交" + ("高于" if vol_ok else "低于") + "5日均量")
+    if zt >= 60:
+        parts.append(f"涨停 {zt} 家、赚钱效应活跃")
+    elif zt <= 30:
+        parts.append(f"涨停仅 {zt} 家、情绪偏弱")
+    else:
+        parts.append(f"涨停 {zt} 家、赚钱效应一般")
+    env.summary = (
+        "，".join(parts)
+        + f"。综合判定：{env.regime}环境，仓位上限参考：{env.cap}。"
+    )
     return env, trade_date
 
 
@@ -661,7 +736,7 @@ def save_history(entries: list[dict], date: str, candidates: list[Board]) -> Non
             "date": date,
             "codes": [b.code for b in candidates],
             "top": [
-                {"code": b.code, "name": b.name, "kind": b.kind, "score": b.total}
+                {"code": b.code, "name": b.name, "kind": b.kind, "score": b.total, "pct": b.pct}
                 for b in candidates[:TOP_N]
             ],
         }
@@ -681,17 +756,90 @@ def _fmt_signals(b: Board, is_new: bool) -> str:
     return "·".join(labels) if labels else "--"
 
 
+def _flow_str(v: float | None) -> str:
+    if v is None:
+        return "--"
+    yi = v / 1e8
+    return f"净流入{yi:+.1f}亿" if yi >= 0 else f"净流出{abs(yi):.1f}亿"
+
+
+def _position_note(b: Board) -> str:
+    if b.drawdown is None:
+        return "位置数据缺失"
+    dd = b.drawdown * 100
+    if dd <= -25:
+        return f"距一年高点 {dd:.1f}%，处于低位"
+    if dd <= -10:
+        return f"距一年高点 {dd:.1f}%，处于中低位"
+    return f"距一年高点仅 {abs(dd):.1f}%，接近高位"
+
+
+def _crowd_note(b: Board) -> str:
+    r20 = (b.r20 or 0) * 100
+    if r20 >= 25:
+        return f"20日涨幅已达 {r20:.0f}%，热度较高"
+    if r20 >= 10:
+        return f"20日涨幅 {r20:.0f}%，开始受到关注"
+    return f"20日涨幅仅 {r20:.1f}%，尚无人问津"
+
+
+def _interp_text(b: Board) -> str:
+    vp = f"今日{_fmt_pct(b.pct)}、量比{_fmt(b.vr)}，温和放量上攻" if b.vp_s == 2 else \
+        f"今日{_fmt_pct(b.pct)}、量比{_fmt(b.vr)}，量价配合一般"
+    pct_part = f"（占比 {b.main_pct:.1f}%）" if b.main_pct is not None else ""
+    flow_part = _flow_str(b.main_flow)
+    capital = f"主力{flow_part}{pct_part}，连续 {b.consec_inflow} 日净流入" if b.cap_s > 0 else \
+        f"主力{flow_part}，资金面偏弱"
+    verdict = "符合'低位温和启动'形态" if b.pos_s >= 1 and b.vp_s >= 1 else "信号偏弱、需进一步观察"
+    return (
+        f"{vp}；{_position_note(b)}；{capital}；{_crowd_note(b)}。"
+        f"综合 {b.total} 分，{verdict}。重点确认：催化剂能否持续、利好能否落到利润。"
+    )
+
+
+def _detail_lines(i: int, b: Board, leaders: list[tuple[str, float]]) -> list[str]:
+    pct_part = f"，占比 {b.main_pct:.1f}%" if b.main_pct is not None else ""
+    lines = [
+        f"{i}. {b.name}（{b.kind}） {b.total} 分 [{'·'.join(b.labels) or '--'}]",
+        f"   走势：当日 {_fmt_pct(b.pct)}，5日 {_fmt_pct(b.r5)}，20日 {_fmt_pct(b.r20)}，"
+        f"60日 {_fmt_pct(b.r60)}；距一年高点 {_fmt_pct(b.drawdown)}；量比 {_fmt(b.vr)}；"
+        f"连续上涨 {b.consec_up} 日",
+        f"   资金：主力 {_flow_str(b.main_flow)}{pct_part}，连续 {b.consec_inflow} 日净流入",
+        f"   打分：位置{b.pos_s} + 量价{b.vp_s} + 资金{b.cap_s} + 拥挤度{b.crowd_s} = {b.total}",
+        f"   解读：{_interp_text(b)}",
+    ]
+    if leaders:
+        lines.append("   板块内领涨：" + "、".join(f"{n} {_fmt_pct(p)}" for n, p in leaders))
+    return lines
+
+
 def render_text(r: Report) -> str:
     lines: list[str] = []
     lines.append("=" * 78)
-    lines.append(f"{r.date} 板块扫描候选（机器初筛 v1，门槛 ≥{MIN_SCORE}）")
+    lines.append(f"{r.date} 板块扫描报告（机器初筛 v1，门槛 ≥{MIN_SCORE}）")
     lines.append("=" * 78)
-    lines.append(f"【大盘环境】{r.env.regime} | 仓位上限参考：{r.env.cap}")
+
+    lines.append(f"【一、大盘环境与仓位】{r.env.regime} | 仓位上限参考：{r.env.cap}")
     for d in r.env.detail:
         lines.append(f"- {d}")
+    if r.env.summary:
+        lines.append(f"- 解读：{r.env.summary}")
 
     lines.append("")
-    lines.append(f"【候选榜】通过评分 {r.passed} 个，展示前 {min(len(r.candidates), TOP_N)} 个")
+    lines.append("【二、筛选漏斗与排除统计】")
+    stage = r.stage_counts
+    lines.append(
+        f"- 全量快照 {stage.get('total', 0)} 个板块 → 预筛达标 {stage.get('after_snapshot', 0)} → "
+        f"历史校验通过 {stage.get('after_history', 0)} → 四维评分通过 {r.passed} 个"
+    )
+    if r.excl_stats:
+        dist = "、".join(f"{k} {v}" for k, v in sorted(r.excl_stats.items(), key=lambda x: -x[1]))
+        lines.append(f"- 历史阶段排除分布：{dist}")
+    for name, kind, reason in r.excluded_examples[:5]:
+        lines.append(f"- 例：{kind}·{name} → {reason}")
+
+    lines.append("")
+    lines.append(f"【三、候选榜总览】通过评分 {r.passed} 个，展示前 {min(len(r.candidates), TOP_N)} 个")
     lines.append(
         f"{'#':<3}{'板块':<10}{'类型':<4}{'当日':>7}{'5日':>7}{'20日':>7}"
         f"{'距高点':>7}{'量比':>6}{'主力':>9}{'连续':>4}{'分':>3} 信号"
@@ -707,41 +855,42 @@ def render_text(r: Report) -> str:
         lines.append("- 今日无板块通过评分门槛（可降低 --min-score 或检查数据源）")
 
     lines.append("")
-    lines.append("【入选理由】")
-    for i, b in enumerate(r.candidates[:8], 1):
-        parts = [
-            f"位置{_fmt_pct(b.drawdown)}({b.pos_s})",
-            f"量价{_fmt_pct(b.pct)}/{_fmt(b.vr)}({b.vp_s})",
-            f"资金连续{b.consec_inflow}日({b.cap_s})",
-            f"拥挤20日{_fmt_pct(b.r20)}({b.crowd_s})",
-        ]
-        lines.append(f"{i}. {b.name}：{'，'.join(parts)} = {b.total}分")
+    lines.append(f"【四、候选板块详解】（前 {min(len(r.candidates), LEADERS_TOP_N)} 个）")
+    for i, b in enumerate(r.candidates[:LEADERS_TOP_N], 1):
+        lines.extend(_detail_lines(i, b, r.leaders.get(b.code, [])))
 
     lines.append("")
-    lines.append("【与昨日对比】")
-    lines.append(f"- 新入选 {len(r.new_in)}：{('、'.join(b.name for b in r.new_in[:10]) or '无')}")
-    lines.append(f"- 持续候选 {len(r.still_in)}：{('、'.join(b.name for b in r.still_in[:10]) or '无')}")
+    lines.append("【五、与昨日对比】")
+    lines.append(
+        f"- 新入选 {len(r.new_in)}："
+        + ("、".join(f"{b.name}({b.total}分)" for b in r.new_in[:10]) or "无")
+    )
+    still_parts = []
+    for b in r.still_in[:10]:
+        prev = r.prev.get(b.code, {})
+        ps = prev.get("score")
+        if ps is None:
+            still_parts.append(f"{b.name}({b.total}分)")
+        else:
+            still_parts.append(f"{b.name} {ps}→{b.total}分({b.total - ps:+d})")
+    lines.append(f"- 持续候选 {len(r.still_in)}：" + ("、".join(still_parts) or "无"))
     lines.append(f"- 退出 {len(r.dropped)}：{('、'.join(r.dropped[:10]) or '无')}")
 
     lines.append("")
-    lines.append("【排除说明】")
-    stage = r.stage_counts
-    lines.append(
-        f"- 扫描 {stage.get('total', 0)} 个板块，快照预筛达标 {stage.get('after_snapshot', 0)}，"
-        f"历史校验通过 {stage.get('after_history', 0)}，"
-        f"最终通过 {r.passed}"
-    )
-    for name, kind, reason in r.excluded_examples[:5]:
-        lines.append(f"- {kind}·{name}：{reason}")
-
-    lines.append("")
-    lines.append("【待人工逻辑体检】")
+    lines.append("【六、待人工逻辑体检】")
     for i, b in enumerate(r.candidates[:10], 1):
-        lines.append(f"{i}. {b.name} → 催化剂是什么？能否持续？利好能否落到利润？板块在哪一阶段？")
+        lines.append(
+            f"{i}. {b.name}：催化剂是什么（政策/价格/供需）？能否持续？"
+            f"利好能否落到利润？板块处于哪一阶段？"
+        )
 
     lines.append("")
-    lines.append("【数据说明】")
-    lines.append("- 机器分只衡量 位置/量价/资金/拥挤度，不含逻辑维度；融资余额与ETF份额未纳入(v2)。")
+    lines.append("【七、数据与方法说明】")
+    lines.append(
+        f"- 评分：位置/量价/资金/拥挤度 各 0–2 分，满分 8，≥{MIN_SCORE} 入候选；"
+        f"不含逻辑维度，融资余额与 ETF 份额未纳入(v2)。"
+    )
+    lines.append("- 口径：距一年高点回撤按收盘价序列计算；主力净流入为板块口径（元）。")
     lines.append("- 数据来源：东方财富公开接口。仅供研究参考，不构成投资建议。")
     for w in r.warnings:
         lines.append(f"- ⚠️ {w}")
@@ -750,53 +899,87 @@ def render_text(r: Report) -> str:
 
 def build_children(r: Report) -> list[dict]:
     c: list[dict] = []
-    c.append(_text_block("paragraph", f"**{r.date} 板块扫描候选**（机器初筛 v1，门槛 ≥{MIN_SCORE}）"))
-    c.append(_text_block("heading_2", "一、大盘环境"))
+    c.append(_text_block("paragraph", f"**{r.date} 板块扫描报告**（机器初筛 v1，门槛 ≥{MIN_SCORE}）"))
+
+    c.append(_text_block("heading_2", "一、大盘环境与仓位"))
     c.append(_labeled_block("环境", f"{r.env.regime}，仓位上限参考：{r.env.cap}"))
     for d in r.env.detail:
         c.append(_text_block("bulleted_list_item", d))
+    if r.env.summary:
+        c.append(_labeled_block("解读", r.env.summary))
 
-    c.append(_text_block("heading_2", f"二、候选榜（{r.passed} 个通过，展示前 {min(len(r.candidates), TOP_N)}）"))
+    c.append(_text_block("heading_2", "二、筛选漏斗与排除统计"))
+    stage = r.stage_counts
+    c.append(
+        _labeled_block(
+            "漏斗",
+            f"全量快照 {stage.get('total', 0)} → 预筛达标 {stage.get('after_snapshot', 0)} → "
+            f"历史校验通过 {stage.get('after_history', 0)} → 评分通过 {r.passed}",
+        )
+    )
+    if r.excl_stats:
+        c.append(
+            _labeled_block(
+                "排除分布",
+                "、".join(f"{k} {v}" for k, v in sorted(r.excl_stats.items(), key=lambda x: -x[1])),
+            )
+        )
+    for name, kind, reason in r.excluded_examples[:5]:
+        c.append(_labeled_block(f"例：{kind}·{name}", reason))
+
+    c.append(_text_block("heading_2", f"三、候选榜总览（{r.passed} 个通过）"))
     for i, b in enumerate(r.candidates[:TOP_N], 1):
-        flow = _fmt_yi(b.main_flow) if b.main_flow is not None else "--"
         text = (
             f"{b.kind} 当日{_fmt_pct(b.pct)} 5日{_fmt_pct(b.r5)} 20日{_fmt_pct(b.r20)} "
             f"60日{_fmt_pct(b.r60)} 距高点{_fmt_pct(b.drawdown)} 量比{_fmt(b.vr)} "
-            f"主力{flow}(连续{b.consec_inflow}日) 分{b.total} "
+            f"主力{_flow_str(b.main_flow)}(连续{b.consec_inflow}日) 分{b.total} "
             f"[{_fmt_signals(b, any(x is b for x in r.new_in))}]"
         )
         c.append(_labeled_block(f"{i}. {b.name}", text))
     if not r.candidates:
         c.append(_text_block("bulleted_list_item", "今日无板块通过评分门槛。"))
 
-    c.append(_text_block("heading_2", "三、与昨日对比"))
-    c.append(_labeled_block("新入选", "、".join(b.name for b in r.new_in[:10]) or "无"))
-    c.append(_labeled_block("持续候选", "、".join(b.name for b in r.still_in[:10]) or "无"))
-    c.append(_labeled_block("退出", "、".join(r.dropped[:10]) or "无"))
+    c.append(_text_block("heading_2", f"四、候选板块详解（前 {min(len(r.candidates), LEADERS_TOP_N)} 个）"))
+    for i, b in enumerate(r.candidates[:LEADERS_TOP_N], 1):
+        for line in _detail_lines(i, b, r.leaders.get(b.code, [])):
+            c.append(_text_block("paragraph", line))
 
-    c.append(_text_block("heading_2", "四、排除说明"))
-    stage = r.stage_counts
+    c.append(_text_block("heading_2", "五、与昨日对比"))
     c.append(
         _labeled_block(
-            "漏斗",
-            f"扫描{stage.get('total', 0)} → 快照预筛达标{stage.get('after_snapshot', 0)} → "
-            f"历史校验通过{stage.get('after_history', 0)} → 通过{r.passed}",
+            "新入选",
+            "、".join(f"{b.name}({b.total}分)" for b in r.new_in[:10]) or "无",
         )
     )
-    for name, kind, reason in r.excluded_examples[:5]:
-        c.append(_labeled_block(f"{kind}·{name}", reason))
+    still_parts = []
+    for b in r.still_in[:10]:
+        prev = r.prev.get(b.code, {})
+        ps = prev.get("score")
+        still_parts.append(
+            f"{b.name} {ps}→{b.total}分({b.total - ps:+d})" if ps is not None else f"{b.name}({b.total}分)"
+        )
+    c.append(_labeled_block("持续候选", "、".join(still_parts) or "无"))
+    c.append(_labeled_block("退出", "、".join(r.dropped[:10]) or "无"))
 
-    c.append(_text_block("heading_2", "五、待人工逻辑体检"))
+    c.append(_text_block("heading_2", "六、待人工逻辑体检"))
     for i, b in enumerate(r.candidates[:10], 1):
         c.append(
             _text_block(
                 "bulleted_list_item",
-                f"{b.name}：催化剂是什么？能否持续？利好能否落到利润？板块在哪一阶段？",
+                f"{b.name}：催化剂是什么（政策/价格/供需）？能否持续？"
+                f"利好能否落到利润？板块处于哪一阶段？",
             )
         )
 
-    c.append(_text_block("heading_2", "说明"))
-    c.append(_text_block("bulleted_list_item", "机器分不含逻辑维度；融资余额、ETF份额未纳入(v2)。"))
+    c.append(_text_block("heading_2", "七、数据与方法说明"))
+    c.append(
+        _text_block(
+            "bulleted_list_item",
+            f"评分：位置/量价/资金/拥挤度 各 0–2 分，满分 8，≥{MIN_SCORE} 入候选；"
+            f"不含逻辑维度，融资余额与 ETF 份额未纳入(v2)。",
+        )
+    )
+    c.append(_text_block("bulleted_list_item", "口径：距一年高点回撤按收盘价序列计算；主力净流入为板块口径。"))
     c.append(_text_block("bulleted_list_item", "⚠️ 数据仅供研究参考，不构成投资建议。"))
     for w in r.warnings:
         c.append(_text_block("bulleted_list_item", f"⚠️ {w}"))
@@ -808,14 +991,14 @@ def write_notion(r: Report) -> None:
         print("[warn] 未设置 NOTION_TOKEN，跳过 Notion 写入", file=sys.stderr)
         return
     db_id = NOTION_DATABASE_ID or FALLBACK_DB_ID
-    title = f"{r.date} 板块扫描候选"
+    title = f"{r.date} 板块扫描报告"
     try:
         existing = query_database_rows(db_id)
     except RuntimeError as exc:
         print(f"[warn] 无法查询数据库，跳过写入: {exc}", file=sys.stderr)
         return
 
-    found = False
+    found_id = None
     old_ids: list[str] = []
     for row in existing:
         props = row.get("properties", {})
@@ -823,14 +1006,42 @@ def write_notion(r: Report) -> None:
         for p in props.values():
             if p.get("type") == "title":
                 t = "".join(x.get("plain_text", "") for x in p.get("title", []))
-        if t == title:
-            found = True
+        if t == title or t == f"{r.date} 板块扫描候选":
+            found_id = row["id"]
         elif "板块扫描" in t:
             old_ids.append(row["id"])
 
-    if found:
-        print(f"[skip] 数据库已存在: {title} @ {r.date}")
+    children = build_children(r)
+    if found_id:
+        # 同日已有记录：清空旧块后整体替换，保证保留收盘后的最新数据
+        try:
+            ids: list[str] = []
+            cursor = None
+            while True:
+                params: dict = {"page_size": 100}
+                if cursor:
+                    params["start_cursor"] = cursor
+                resp = requests.get(
+                    f"{NOTION_API}/blocks/{found_id}/children",
+                    params=params,
+                    headers=notion_headers(),
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    break
+                data = resp.json()
+                ids.extend(b["id"] for b in data.get("results", []))
+                if not data.get("has_more"):
+                    break
+                cursor = data.get("next_cursor")
+            for bid in ids:
+                requests.delete(f"{NOTION_API}/blocks/{bid}", headers=notion_headers(), timeout=30)
+            notion_append_children(found_id, children)
+            print(f"[ok] 已更新扫描报告: {title} @ {r.date}")
+        except Exception as exc:
+            print(f"[warn] 更新失败: {exc}", file=sys.stderr)
         return
+
     for pid in old_ids:
         try:
             resp = requests.patch(
@@ -844,7 +1055,6 @@ def write_notion(r: Report) -> None:
         except Exception:
             pass
 
-    children = build_children(r)
     properties = {
         "名称": {"title": [{"type": "text", "text": {"content": title}}]},
         "日期": {"date": {"start": r.date}},
@@ -855,7 +1065,7 @@ def write_notion(r: Report) -> None:
         )
         if len(children) > 90:
             notion_append_children(page["id"], children[90:])
-        print(f"[ok] 已写入扫描记录: {title} @ {r.date}")
+        print(f"[ok] 已写入扫描报告: {title} @ {r.date}")
     except RuntimeError as exc:
         print(f"[warn] Notion 写入失败: {exc}", file=sys.stderr)
 
@@ -921,6 +1131,7 @@ def scan(min_score: int, max_boards: int) -> tuple[Report, list[dict], dict]:
         if not fetch_board_history(b, cache, trade_date):
             r.hist_failed += 1
             b.excluded = "无历史数据"
+            r.excl_stats[b.excluded] = r.excl_stats.get(b.excluded, 0) + 1
             fails += 1
             if fails >= COOLDOWN_FAILS:
                 print(f"[info] 连续 {fails} 次失败，冷却 {COOLDOWN_SECS}s 后继续…", flush=True)
@@ -934,6 +1145,7 @@ def scan(min_score: int, max_boards: int) -> tuple[Report, list[dict], dict]:
         reason = classify(b)
         if reason:
             b.excluded = reason
+            r.excl_stats[reason] = r.excl_stats.get(reason, 0) + 1
             if reason not in ("形态未达标", "下降趋势未扭转", "短期无上涨") and len(r.excluded_examples) < 6:
                 r.excluded_examples.append((b.name, b.kind, reason))
             time.sleep(gap)
@@ -949,9 +1161,7 @@ def scan(min_score: int, max_boards: int) -> tuple[Report, list[dict], dict]:
     prev_codes: set[str] = set()
     if entries:
         prev_codes = set(entries[-1].get("codes", []))
-        prev_names = {x.get("code"): x.get("name") for x in entries[-1].get("top", [])}
-    else:
-        prev_names = {}
+        r.prev = {x.get("code"): x for x in entries[-1].get("top", []) if x.get("code")}
 
     for b in pool_c:
         b.pos_s = score_position(b)
@@ -976,12 +1186,14 @@ def scan(min_score: int, max_boards: int) -> tuple[Report, list[dict], dict]:
     today_codes = {b.code for b in passed}
     r.new_in = [b for b in passed if b.code not in prev_codes]
     r.still_in = [b for b in passed if b.code in prev_codes]
-    r.dropped = [
-        prev_names.get(c, c) for c in sorted(prev_codes - today_codes)
-    ]
+    r.dropped = [r.prev.get(c, {}).get("name", c) for c in sorted(prev_codes - today_codes)]
 
     if r.hist_failed:
         r.warnings.append(f"{r.hist_failed} 个板块历史数据获取失败，已跳过。")
+
+    for b in passed[:LEADERS_TOP_N]:
+        r.leaders[b.code] = fetch_board_leaders(b)
+        time.sleep(0.6)
 
     print("[5/6] 生成报告…", flush=True)
     r.stage_counts["passed"] = r.passed
