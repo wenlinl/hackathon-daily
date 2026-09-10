@@ -147,6 +147,10 @@ class Report:
     excluded_examples: list[tuple[str, str, str]] = field(default_factory=list)
     excl_stats: dict = field(default_factory=dict)
     leaders: dict[str, list[tuple[str, float]]] = field(default_factory=dict)
+    top_gainers: list[tuple[str, float]] = field(default_factory=list)
+    top_losers: list[tuple[str, float]] = field(default_factory=list)
+    board_up: int = 0
+    board_down: int = 0
     new_in: list[Board] = field(default_factory=list)
     still_in: list[Board] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
@@ -840,6 +844,11 @@ def render_text(r: Report) -> str:
 
     lines.append("")
     lines.append(f"【三、候选榜总览】通过评分 {r.passed} 个，展示前 {min(len(r.candidates), TOP_N)} 个")
+    lines.append(f"- 今日板块涨跌：上涨 {r.board_up} / 下跌 {r.board_down}")
+    if r.top_gainers:
+        lines.append("- 领涨：" + "、".join(f"{n} {_fmt_pct(p)}" for n, p in r.top_gainers))
+    if r.top_losers:
+        lines.append("- 领跌：" + "、".join(f"{n} {_fmt_pct(p)}" for n, p in r.top_losers))
     lines.append(
         f"{'#':<3}{'板块':<10}{'类型':<4}{'当日':>7}{'5日':>7}{'20日':>7}"
         f"{'距高点':>7}{'量比':>6}{'主力':>9}{'连续':>4}{'分':>3} 信号"
@@ -928,6 +937,11 @@ def build_children(r: Report) -> list[dict]:
         c.append(_labeled_block(f"例：{kind}·{name}", reason))
 
     c.append(_text_block("heading_2", f"三、候选榜总览（{r.passed} 个通过）"))
+    c.append(_labeled_block("板块涨跌", f"上涨 {r.board_up} / 下跌 {r.board_down}"))
+    if r.top_gainers:
+        c.append(_labeled_block("领涨", "、".join(f"{n} {_fmt_pct(p)}" for n, p in r.top_gainers)))
+    if r.top_losers:
+        c.append(_labeled_block("领跌", "、".join(f"{n} {_fmt_pct(p)}" for n, p in r.top_losers)))
     for i, b in enumerate(r.candidates[:TOP_N], 1):
         text = (
             f"{b.kind} 当日{_fmt_pct(b.pct)} 5日{_fmt_pct(b.r5)} 20日{_fmt_pct(b.r20)} "
@@ -1088,6 +1102,11 @@ def scan(min_score: int, max_boards: int) -> tuple[Report, list[dict], dict]:
     print("[2/6] 拉取全量板块快照…", flush=True)
     boards = fetch_all_boards()
     r.stage_counts["total"] = len(boards)
+    ups = sorted((b for b in boards.values() if b.pct > 0), key=lambda x: -x.pct)
+    downs = sorted((b for b in boards.values() if b.pct < 0), key=lambda x: x.pct)
+    r.top_gainers = [(b.name, b.pct) for b in ups[:5]]
+    r.top_losers = [(b.name, b.pct) for b in downs[:5]]
+    r.board_up, r.board_down = len(ups), len(downs)
 
     # 首轮：用快照自带字段做硬过滤（涨幅/成交额/量比/60日涨幅/合成板块），
     # 大幅减少后续逐板块历史数据请求量。
